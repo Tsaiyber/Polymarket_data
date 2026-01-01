@@ -52,8 +52,8 @@ state.json
 *.csv
 *.feather
 
-# Dataset folder (large files on HuggingFace)
-polymarket_data/*.parquet
+# Dataset folder (on HuggingFace only)
+polymarket_data/
 
 # Environment
 .env
