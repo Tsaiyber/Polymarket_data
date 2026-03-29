@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-poly_onchain 命令行工具
+polymarket 命令行工具
 
 使用方法:
-    python -m poly_onchain.cli fetch-onchain --blocks 1000
-    python -m poly_onchain.cli fetch-markets
-    python -m poly_onchain.cli process
-    python -m poly_onchain.cli update
+    uv run polymarket fetch-onchain --blocks 1000
+    uv run polymarket fetch-markets
+    uv run polymarket process
+    uv run polymarket update
 """
 
 import argparse
@@ -55,7 +55,7 @@ def setup_logging(verbose: bool = False):
 
     # 文件处理器（主要日志输出）
     LOG_DIR.mkdir(parents=True, exist_ok=True)
-    log_file = LOG_DIR / 'poly_onchain.log'
+    log_file = LOG_DIR / 'polymarket.log'
     file_handler = logging.FileHandler(log_file, encoding='utf-8')
     file_handler.setLevel(log_level)
     file_handler.setFormatter(logging.Formatter(log_format, date_format))
@@ -1142,10 +1142,14 @@ def cmd_update(args):
     logger.info("=== 更新市场数据 ===")
     cmd_fetch_markets(args)
 
+    logger.info("\n=== 刷新已有市场状态 ===")
+    cmd_update_markets(args)
+
     logger.info("\n=== 更新链上数据 ===")
     args.continue_from = True
     args.blocks = None
     args.range = None
+    args.merge = True
     cmd_fetch_onchain(args)
 
     logger.info("\n=== 处理交易 ===")

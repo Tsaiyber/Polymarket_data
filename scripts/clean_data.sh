@@ -4,5 +4,5 @@
 set -e
 
 echo "Processing on-chain data..."
-python -m polymarket.cli process
+uv run polymarket process
 echo "✓ Data processing completed"

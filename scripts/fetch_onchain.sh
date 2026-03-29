@@ -7,5 +7,5 @@ set -e
 BLOCKS=${1:-1000}
 
 echo "Fetching on-chain data (last $BLOCKS blocks)..."
-python -m polymarket.cli fetch-onchain --blocks "$BLOCKS"
+uv run polymarket fetch-onchain --blocks "$BLOCKS"
 echo "✓ On-chain data fetched successfully"

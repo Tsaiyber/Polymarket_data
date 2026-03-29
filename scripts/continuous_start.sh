@@ -9,7 +9,7 @@ echo "Starting continuous data fetching..."
 mkdir -p logs data
 
 # Start the process in background
-nohup python -m polymarket.tools.continuous_fetch > logs/continuous_fetch.log 2>&1 &
+nohup uv run python -m polymarket.tools.continuous_fetch > logs/continuous_fetch.log 2>&1 &
 
 PID=$!
 echo $PID > logs/continuous_fetch.pid

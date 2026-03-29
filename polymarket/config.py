@@ -6,6 +6,11 @@ import os
 from pathlib import Path
 from typing import Optional
 
+from dotenv import load_dotenv
+
+# 加载项目根目录的 .env 文件
+load_dotenv(Path(__file__).parent.parent / '.env')
+
 
 # ============== 路径 ==============
 

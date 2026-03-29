@@ -1,21 +1,13 @@
 #!/bin/bash
-# Full update: fetch markets, on-chain data, and process
+# Full update: fetch markets, refresh market states, fetch on-chain data, and process
 
 set -e
 
 echo "=== Full Update Pipeline ==="
 echo ""
 
-echo "[1/3] Fetching market data..."
-python -m polymarket.cli fetch-markets
-echo ""
-
-echo "[2/3] Fetching on-chain data..."
-python -m polymarket.cli fetch-onchain --continue
-echo ""
-
-echo "[3/3] Processing data..."
-python -m polymarket.cli process
+echo "[1/1] Running full update pipeline..."
+uv run polymarket update
 echo ""
 
 echo "✓ Full update completed"

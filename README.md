@@ -2,10 +2,10 @@
 
 <h1>Polymarket Data</h1>
 
-<h3>Complete Data Infrastructure for Polymarket — Fetch, Process, Analyze</h3>
+<h3>Complete Data Infrastructure for Polymarket — Download, Merge, Stay Updated</h3>
 
 <p style="max-width: 600px; margin: 0 auto;">
-A comprehensive toolkit and dataset for Polymarket prediction markets. Fetch trading data directly from Polygon blockchain and Gamma API, process into multiple analysis-ready formats, and analyze with ease.
+A comprehensive toolkit and dataset for Polymarket prediction markets. Download historical data from HuggingFace, merge into a single file, and keep it up-to-date with incremental blockchain fetching.
 </p>
 
 <p>
@@ -35,7 +35,7 @@ A comprehensive toolkit and dataset for Polymarket prediction markets. Fetch tra
     <img src="https://img.shields.io/badge/License-MIT-blue.svg" alt="License"/>
   </a>
   <a href="https://www.python.org/downloads/">
-    <img src="https://img.shields.io/badge/Python-3.12+-blue.svg" alt="Python 3.12+"/>
+    <img src="https://img.shields.io/badge/Python-3.13+-blue.svg" alt="Python 3.13+"/>
   </a>
 </p>
 
@@ -43,170 +43,285 @@ A comprehensive toolkit and dataset for Polymarket prediction markets. Fetch tra
 
 ## TL;DR
 
-We provide **107GB of trading data** from Polymarket containing **1.1 billion records** across 268K+ markets, along with a complete toolkit to fetch, process, and analyze the data. Perfect for market research, behavioral studies, and quantitative analysis.
-
-**Get all historical data before 2026**: Download the complete dataset from [HuggingFace](https://huggingface.co/datasets/SII-WANGZJ/Polymarket_data), or use this toolkit to fetch the latest data yourself.
-
-## Highlights
-
-- **Complete Data**: 1.1 billion trading records from Polymarket's inception to present
-- **Direct Data Access**: Fetch data directly from Polygon blockchain, no third-party dependencies
-- **Multiple Formats**: 5 analysis-ready datasets for different research needs
-- **Real-time Updates**: Continuous mode to sync new data every 2 seconds
-- **Resume Support**: Auto-save progress, restart anytime without data loss
-- **Efficient Storage**: Parquet format with compression, supports incremental writes
-
-## vs Third-party Data Sources
-
-| Field | Polymarket Data | Third-party |
-|-------|-----------------|-------------|
-| block_number | Yes | No |
-| contract name | Yes | No |
-| maker_fee / taker_fee / protocol_fee | Yes | No |
-| order_hash | Yes | No |
-| market_id (auto-linked) | Yes | Yes |
-| Missing token auto-fill | Yes | Yes |
+**163GB of on-chain trading data** from Polymarket — 800M+ raw events, 470M+ processed trades across 600K+ markets, from inception to present. Download the historical snapshot from HuggingFace, merge into a single file, then use this toolkit to keep it current with incremental blockchain fetching.
 
 ## Dataset Overview
 
 | File | Size | Records | Description |
 |------|------|---------|-------------|
-| `orderfilled.parquet` | 31GB | 293.3M | Raw blockchain events from OrderFilled logs |
-| `trades.parquet` | 32GB | 293.3M | Processed trades with market metadata linkage |
-| `markets.parquet` | 68MB | 268,706 | Market information and metadata |
-| `quant.parquet` | 21GB | 170.3M | Clean market data with unified YES perspective |
-| `users.parquet` | 23GB | 340.6M | User behavior data split by maker/taker roles |
+| `orderfilled.parquet` | ~100GB | 799.3M | Raw blockchain OrderFilled events (split into 4 shards on HuggingFace) |
+| `trades.parquet` | 28GB | 470.8M | Processed trades with market metadata linkage |
+| `markets.parquet` | 85MB | 607K | Market information and metadata |
+| `quant.parquet` | 30GB | 470.8M | Clean trades with unified YES perspective |
+| `users.parquet` | — | — | User-level split by maker/taker (generated locally, not on HuggingFace) |
 
-**Total**: 107GB, 1.1 billion records
+**Coverage**: 2022-11-21 to present
 
-**Download from HuggingFace**: [SII-WANGZJ/Polymarket_data](https://huggingface.co/datasets/SII-WANGZJ/Polymarket_data)
+## Workflow
 
-## Use Cases
+```mermaid
+flowchart TD
+    subgraph S1["  Step 1 · Download  "]
+        direction TB
+        HF[("🤗 HuggingFace")]
+        OF1["orderfilled1.parquet"]
+        OF2["orderfilled2.parquet"]
+        OF3["orderfilled3.parquet"]
+        OF4["orderfilled4.parquet"]
+        TR["trades.parquet"]
+        MK["markets.parquet"]
+        QT["quant.parquet"]
+        HF -->|hf download| OF1 & OF2 & OF3 & OF4 & TR & MK & QT
+    end
 
-### Market Research & Analysis
-- Study prediction market dynamics and price discovery mechanisms
-- Analyze market efficiency and information aggregation
-- Research crowd wisdom and forecasting accuracy
+    subgraph S2["  Step 2 · Merge  (one-time)  "]
+        direction TB
+        MP1["merge_parquet.py"]
+        OF[("orderfilled.parquet\n799M rows · ~100GB")]
+        OF1 & OF2 & OF3 & OF4 --> MP1 --> OF
+    end
 
-### Behavioral Studies
-- Track individual user trading patterns and decision-making
-- Study market participant behavior under different conditions
-- Analyze risk preferences and trading strategies
+    subgraph S3["  Step 3 · Hot Update  "]
+        direction TB
+        BC[("⛓ Polygon Blockchain\nvia Alchemy RPC")]
+        SS["orderfilled_session.parquet\nnew blocks"]
+        MP2["merge_parquet.py"]
+        OFU[("orderfilled.parquet\nupdated ✓")]
+        BC -->|"fetch-onchain --continue"| SS
+        OF -.->|base| MP2
+        SS --> MP2 --> OFU
+    end
 
-### Data Science & Machine Learning
-- Train models for price prediction and market forecasting
-- Feature engineering for time-series analysis
-- Develop algorithms for market analysis
+    classDef source    fill:#4361EE,stroke:#3A0CA3,color:#fff,rx:8
+    classDef raw       fill:#F77F00,stroke:#D62828,color:#fff
+    classDef tool      fill:#7B2D8B,stroke:#560A86,color:#fff,rx:4
+    classDef main      fill:#2D6A4F,stroke:#1B4332,color:#fff,rx:8
+    classDef updated   fill:#52B788,stroke:#2D6A4F,color:#fff,rx:8
+    classDef step      fill:#F8F9FA,stroke:#DEE2E6,color:#333
 
-### Academic Research
-- Economics and finance research on prediction markets
-- Social science studies on collective intelligence
-- Computer science research on blockchain data analysis
+    class HF,BC source
+    class OF1,OF2,OF3,OF4,TR,MK,QT,SS raw
+    class MP1,MP2 tool
+    class OF main
+    class OFU updated
+    class S1,S2,S3 step
+```
+
+---
 
 ## Quick Start
 
-### Installation
+### 1. Install
 
 ```bash
-# Clone repository
 git clone https://github.com/SII-WANGZJ/Polymarket_data.git
 cd Polymarket_data
-
-# Install dependencies
-pip install -r requirements.txt
-
-# Or install as package
-pip install -e .
+uv sync
 ```
 
-### Download Dataset
+### 2. Configure
+
+```bash
+cp .env.example .env
+```
+
+Edit `.env` with your Alchemy API key (free tier at [alchemy.com](https://www.alchemy.com/) — 30M CU/month, sufficient for all use cases):
+
+```bash
+ALCHEMY_API_KEY=your_alchemy_api_key_here
+```
+
+### 3. Download Historical Data
 
 ```bash
 # Install HuggingFace CLI
-pip install huggingface_hub
+uv tool install huggingface-hub
 
-# Download specific file
-hf download SII-WANGZJ/Polymarket_data quant.parquet --repo-type dataset
+# Download all files (~163GB)
+hf download SII-WANGZJ/Polymarket_data --repo-type dataset --local-dir data/dataset
 
-# Download all files
-hf download SII-WANGZJ/Polymarket_data --repo-type dataset
+# Or download specific files
+hf download SII-WANGZJ/Polymarket_data trades.parquet --repo-type dataset --local-dir data/dataset
+hf download SII-WANGZJ/Polymarket_data quant.parquet --repo-type dataset --local-dir data/dataset
+hf download SII-WANGZJ/Polymarket_data markets.parquet --repo-type dataset --local-dir data/dataset
 ```
 
-### Usage
+### 4. Merge orderfilled Shards (one-time)
 
-#### 1. Continuous Real-time Mode (Recommended)
-
-Automatically fetch new blocks and keep running 24/7:
+HuggingFace distributes `orderfilled` as 4 shards. Merge them into a single file (streaming, memory-safe):
 
 ```bash
-# Start continuous fetching
-./scripts/continuous_start.sh
-
-# View logs
-tail -f logs/continuous_fetch.log
-
-# Stop gracefully
-./scripts/continuous_stop.sh
+uv run python -m polymarket.tools.merge_parquet \
+  data/dataset/orderfilled1.parquet \
+  data/dataset/orderfilled2.parquet \
+  data/dataset/orderfilled3.parquet \
+  data/dataset/orderfilled4.parquet \
+  -o data/dataset/orderfilled.parquet \
+  --log-file logs/merge.log -y
 ```
 
-Features:
-- **Batch mode**: When behind by ≥100 blocks, fetch 100 blocks at once
-- **Real-time mode**: When caught up, fetch 1 block every 2 seconds
-- **Auto data cleaning**: Generate 4 parquet files in real-time
-- **Graceful shutdown**: Ensures all files are properly closed on exit
-
-#### 2. Batch Historical Data
-
-Fetch specific range of historical blocks:
+This runs in the background. Monitor progress:
 
 ```bash
-# Fetch last 10,000 blocks
-python -m polymarket.cli fetch-onchain --blocks 10000
+tail -f logs/merge.log
+```
 
-# Resume from last checkpoint
-python -m polymarket.cli fetch-onchain --continue
+### 5. Incremental Update
+
+Fetch new blocks from the blockchain and append to your local data:
+
+```bash
+# Fetch new blocks since last checkpoint
+uv run polymarket fetch-onchain --continue --alchemy
+```
+
+This produces a session file `data/dataset/orderfilled_session_<timestamp>.parquet`. Merge it into the main file:
+
+```bash
+uv run python -m polymarket.tools.merge_parquet \
+  data/dataset/orderfilled.parquet \
+  data/dataset/orderfilled_session_*.parquet \
+  -o data/dataset/orderfilled_new.parquet -y
+
+# Replace main file
+mv data/dataset/orderfilled_new.parquet data/dataset/orderfilled.parquet
+```
+
+Also update market metadata:
+
+```bash
+uv run polymarket fetch-markets        # fetch new markets
+uv run polymarket update-markets       # refresh unclosed market states
+```
+
+---
+
+## Data Schema
+
+### orderfilled.parquet — Raw Blockchain Events
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `timestamp` | uint64 | Unix timestamp |
+| `block_number` | uint64 | Block number |
+| `transaction_hash` | str | Transaction hash |
+| `log_index` | uint32 | Log index within transaction |
+| `contract` | str | `CTF_EXCHANGE` or `NEGRISK_CTF_EXCHANGE` |
+| `order_hash` | str | Order hash |
+| `maker` / `taker` | str | Trading party addresses |
+| `maker_asset_id` / `taker_asset_id` | str | Asset IDs |
+| `maker_amount_filled` / `taker_amount_filled` | bytes[32] | Filled amounts (raw 256-bit little-endian) |
+| `maker_fee` / `taker_fee` / `protocol_fee` | bytes[32] | Fees (raw 256-bit little-endian) |
+
+### trades.parquet — Processed Trades
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `timestamp` | uint64 | Unix timestamp |
+| `block_number` | uint64 | Block number |
+| `transaction_hash` | str | Transaction hash |
+| `log_index` | uint32 | Log index within transaction |
+| `contract` | str | `CTF_EXCHANGE` or `NEGRISK_CTF_EXCHANGE` |
+| `market_id` | str | Market identifier (linked from token) |
+| `condition_id` | str | Condition identifier |
+| `event_id` | str | Event identifier |
+| `maker` / `taker` | str | Wallet addresses |
+| `price` | float | Trade price (0–1) |
+| `usd_amount` | float | USDC value |
+| `token_amount` | float | Token amount |
+| `maker_direction` / `taker_direction` | str | `BUY` or `SELL` |
+| `nonusdc_side` | str | `token1` (YES) or `token2` (NO) |
+| `asset_id` | str | Non-USDC asset ID |
+
+### quant.parquet — Unified YES Perspective
+
+Filtered and normalized: contract trades removed, all trades normalized to YES token (token1).
+
+**Best for**: market analysis, price studies, time-series forecasting.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `timestamp` | uint64 | Unix timestamp |
+| `block_number` | uint64 | Block number |
+| `transaction_hash` | str | Transaction hash |
+| `log_index` | uint32 | Log index within transaction |
+| `market_id` | str | Market identifier |
+| `condition_id` | str | Condition identifier |
+| `event_id` | str | Event identifier |
+| `price` | float | Trade price (0–1) |
+| `usd_amount` | float | USD value |
+| `token_amount` | float | Token amount |
+| `side` | str | `token1` (YES) or `token2` (NO) |
+| `maker` / `taker` | str | Wallet addresses |
+
+### markets.parquet — Market Metadata
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `id` | str | Market identifier |
+| `question` | str | Market question text |
+| `slug` | str | URL slug |
+| `condition_id` | str | Condition identifier |
+| `token1` / `token2` | str | YES / NO token IDs |
+| `answer1` / `answer2` | str | Option names |
+| `closed` / `active` / `archived` | uint8 | Market state flags |
+| `outcome_prices` | str | Final outcome prices (JSON) |
+| `volume` | float | Total trading volume |
+| `event_id` | str | Parent event identifier |
+| `event_slug` | str | Parent event URL slug |
+| `event_title` | str | Parent event title |
+| `created_at` | timestamp | Market creation time |
+| `end_date` | timestamp | Market resolution date |
+| `updated_at` | timestamp | Last update time |
+| `neg_risk` | uint8 | Whether neg-risk market |
+
+### users.parquet — User Behavior (generated locally)
+
+Each trade split into 2 records (maker + taker), all converted to BUY direction (negative amount = sell).
+
+**Best for**: user profiling, PnL calculation, wallet analysis.
+
+Generate with:
+
+```bash
+uv run polymarket clean
+```
+
+---
+
+## CLI Reference
+
+```bash
+# Fetch new market metadata
+uv run polymarket fetch-markets
+
+# Refresh states of unclosed markets
+uv run polymarket update-markets
+
+# Fetch new on-chain blocks (from last checkpoint)
+uv run polymarket fetch-onchain --continue --alchemy
 
 # Fetch specific block range
-python -m polymarket.cli fetch-onchain --start 80000000 --end 80010000
+uv run polymarket fetch-onchain --range 80000000 80100000 --alchemy
+
+# Process orderfilled → trades
+uv run polymarket process
+
+# Generate quant.parquet and users.parquet from trades
+uv run polymarket clean
 ```
 
-#### 3. Full Pipeline
-
-Complete workflow: fetch markets → fetch on-chain → process data:
+## Utility Tools
 
 ```bash
-# Run full pipeline
-./scripts/update_all.sh
+# Merge multiple parquet files (streaming, memory-safe)
+uv run python -m polymarket.tools.merge_parquet file1.parquet file2.parquet -o merged.parquet
 
-# Or step by step
-./scripts/fetch_markets.sh        # Fetch market metadata
-./scripts/fetch_onchain.sh 5000   # Fetch on-chain data
-./scripts/clean_data.sh           # Clean and process data
-```
+# Sort parquet by timestamp
+uv run python -m polymarket.tools.sort_parquet input.parquet -o sorted.parquet
 
-#### 4. Python API
-
-Use as a library in your Python code:
-
-```python
-from polymarket import LogFetcher, EventDecoder, extract_trades
-from polymarket import load_token_mapping
-
-# 1. Fetch on-chain logs
-fetcher = LogFetcher()
-logs = fetcher.fetch_range_in_batches(start_block, end_block)
-
-# 2. Decode events
-decoder = EventDecoder()
-decoded = decoder.decode_batch(logs)
-events = decoder.format_batch(decoded)
-
-# 3. Load token mapping and extract trades
-token_mapping = load_token_mapping()
-trades_df = extract_trades(events, token_mapping)
-
-# 4. Save to parquet
-trades_df.to_parquet('trades.parquet')
+# Refetch failed blocks
+uv run python -m polymarket.tools.refetch_failed_blocks --start 80000000 --end 80100000
 ```
 
 ## Project Structure
@@ -218,298 +333,47 @@ Polymarket_data/
 │   ├── fetchers/            # Data fetchers (RPC, Gamma API)
 │   ├── processors/          # Data processors (decoder, cleaner)
 │   └── tools/               # Utility tools (merge, sort, etc.)
-├── scripts/                 # Shell scripts for common tasks
-├── polymarket_data/         # Dataset documentation
+├── scripts/                 # Shell scripts
 ├── data/                    # Data storage (gitignored)
+│   ├── dataset/             # Main parquet files
+│   ├── data_clean/          # Derived files (quant, users)
+│   └── latest_result/       # CSV previews
 ├── logs/                    # Logs (gitignored)
-├── README.md
-├── LICENSE
-└── requirements.txt
-```
-
-## Data Schema
-
-### OrderFilled Events (Raw)
-
-| Field | Description |
-|-------|-------------|
-| timestamp | Unix timestamp |
-| block_number | Block number |
-| transaction_hash | Transaction hash |
-| contract | Contract name (CTF_EXCHANGE or NEGRISK_CTF_EXCHANGE) |
-| maker / taker | Trading parties' addresses |
-| maker_asset_id / taker_asset_id | Asset IDs |
-| maker_amount_filled / taker_amount_filled | Filled amounts |
-| maker_fee / taker_fee / protocol_fee | Fees (in wei) |
-| order_hash | Order hash |
-
-### Trades (Processed)
-
-| Field | Description |
-|-------|-------------|
-| market_id | Market ID (auto-linked from token) |
-| answer | Option name (YES/NO/etc.) |
-| price | Trade price (0-1) |
-| usd_amount / token_amount | USDC and token amounts |
-| maker_direction / taker_direction | Buy/sell direction |
-
-### quant.parquet - Clean Market Data
-
-Filtered and normalized trade data with unified token perspective (YES token).
-
-**Key Features:**
-- Unified perspective: All trades normalized to YES token (token1)
-- Clean data: Contract trades filtered out, only real user trades
-- Complete information: Maker/taker roles preserved
-- Best for: Market analysis, price studies, time-series forecasting
-
-**Schema:**
-```python
-{
-    'transaction_hash': str,      # Blockchain transaction hash
-    'block_number': int,          # Block number
-    'datetime': datetime,         # Transaction timestamp
-    'market_id': str,             # Market identifier
-    'maker': str,                 # Maker wallet address
-    'taker': str,                 # Taker wallet address
-    'token_amount': float,        # Amount of tokens traded
-    'usd_amount': float,          # USD value
-    'price': float,               # Trade price (0-1)
-}
-```
-
-### users.parquet - User Behavior Data
-
-Split maker/taker records with unified buy direction for user analysis.
-
-**Key Features:**
-- Split records: Each trade becomes 2 records (one maker, one taker)
-- Unified direction: All converted to BUY (negative amounts = selling)
-- User sorted: Ordered by user for trajectory analysis
-- Best for: User profiling, PnL calculation, wallet analysis
-
-**Schema:**
-```python
-{
-    'transaction_hash': str,      # Transaction hash
-    'block_number': int,          # Block number
-    'datetime': datetime,         # Timestamp
-    'market_id': str,             # Market identifier
-    'user': str,                  # User wallet address
-    'role': str,                  # 'maker' or 'taker'
-    'token_amount': float,        # Signed amount (+ buy, - sell)
-    'usd_amount': float,          # USD value
-    'price': float,               # Trade price
-}
-```
-
-### markets.parquet - Market Metadata
-
-Market information and outcome token details.
-
-**Best for:** Linking trades to market context, filtering by market attributes
-
-See [DATA_DESCRIPTION.md](polymarket_data/DATA_DESCRIPTION.md) for complete schema documentation.
-
-## Data Processing Pipeline
-
-```
-Polygon Blockchain (RPC)    Gamma API
-         ↓                      ↓
-  orderfilled.parquet    markets.parquet
-         ↓
-  trades.parquet (+ Market linkage)
-         ↓
-         ├─→ quant.parquet (Unified YES perspective)
-         │   └─→ Filter contracts + Normalize tokens
-         │
-         └─→ users.parquet (Split maker/taker)
-             └─→ Split records + Unified BUY direction
-```
-
-**Key Transformations:**
-
-1. **quant.parquet**:
-   - Filter out contract trades (keep only user trades)
-   - Normalize all trades to YES token perspective
-   - Preserve maker/taker information
-   - Result: 170.3M records (from 293.3M)
-
-2. **users.parquet**:
-   - Split each trade into 2 records (maker + taker)
-   - Convert all to BUY direction (signed amounts)
-   - Sort by user for easy querying
-   - Result: 340.6M records (from 293.3M × 2, some filtered)
-
-## Example Analysis
-
-### 1. Calculate Market Statistics
-
-```python
-import pandas as pd
-
-df = pd.read_parquet('quant.parquet')
-
-# Market-level statistics
-market_stats = df.groupby('market_id').agg({
-    'usd_amount': ['sum', 'mean'],     # Total volume and average trade size
-    'price': ['mean', 'std', 'min', 'max'],  # Price statistics
-    'transaction_hash': 'count'         # Number of trades
-}).round(4)
-
-print(market_stats.head())
-```
-
-### 2. Track Price Evolution
-
-```python
-import pandas as pd
-import matplotlib.pyplot as plt
-
-df = pd.read_parquet('quant.parquet')
-df['datetime'] = pd.to_datetime(df['datetime'])
-
-# Select a specific market
-market_id = 'your-market-id'
-market_data = df[df['market_id'] == market_id].sort_values('datetime')
-
-# Plot price over time
-plt.figure(figsize=(12, 6))
-plt.plot(market_data['datetime'], market_data['price'])
-plt.title(f'Price Evolution - Market {market_id}')
-plt.xlabel('Date')
-plt.ylabel('Price')
-plt.show()
-```
-
-### 3. Analyze User Behavior
-
-```python
-import pandas as pd
-
-df = pd.read_parquet('users.parquet')
-
-# Calculate net position per user per market
-user_positions = df.groupby(['user', 'market_id']).agg({
-    'token_amount': 'sum',          # Net position (positive = long, negative = short)
-    'usd_amount': 'sum',            # Total USD traded
-    'transaction_hash': 'count'     # Number of trades
-}).reset_index()
-
-# Find most active users
-active_users = user_positions.groupby('user').agg({
-    'market_id': 'count',           # Number of markets traded
-    'usd_amount': 'sum'             # Total volume
-}).sort_values('usd_amount', ascending=False)
-
-print(active_users.head(10))
-```
-
-### 4. Market Volume Analysis
-
-```python
-import pandas as pd
-
-df = pd.read_parquet('quant.parquet')
-markets = pd.read_parquet('markets.parquet')
-
-# Join with market metadata
-df = df.merge(markets[['market_id', 'question']], on='market_id', how='left')
-
-# Top markets by volume
-top_markets = df.groupby(['market_id', 'question']).agg({
-    'usd_amount': 'sum'
-}).sort_values('usd_amount', ascending=False).head(20)
-
-print(top_markets)
+├── .env                     # Local config (gitignored)
+├── .env.example             # Config template
+├── pyproject.toml
+└── uv.lock
 ```
 
 ## Data Quality
 
-- **Complete History**: No missing blocks or gaps in blockchain data
-- **Verified Sources**: All OrderFilled events from 2 official exchange contracts
+- **Complete History**: All OrderFilled events from Polymarket's two exchange contracts, no missing blocks
 - **Blockchain Verified**: Cross-checked against Polygon RPC nodes
-- **Regular Updates**: Automated daily pipeline for fresh data
-- **Open Source**: Fully reproducible collection process
-
-**Contracts Tracked:**
-- Exchange Contract 1: `0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E`
-- Exchange Contract 2: `0xC5d563A36AE78145C45a50134d48A1215220f80a`
-
-## CLI Commands
-
-```bash
-# Fetch market metadata
-python -m polymarket.cli fetch-markets
-
-# Fetch on-chain data
-python -m polymarket.cli fetch-onchain --blocks 1000
-python -m polymarket.cli fetch-onchain --continue
-
-# Process data
-python -m polymarket.cli process
-python -m polymarket.cli clean
-
-# Full update
-python -m polymarket.cli update
-```
-
-## Utility Tools
-
-```bash
-# Merge multiple parquet files
-python -m polymarket.tools.merge_parquet file1.parquet file2.parquet -o merged.parquet
-
-# Sort parquet by timestamp
-python -m polymarket.tools.sort_parquet input.parquet -o sorted.parquet
-
-# Refetch failed blocks
-python -m polymarket.tools.refetch_failed_blocks --start 80000000 --end 80100000
-```
-
-## Configuration
-
-### Environment Variables
-
-```bash
-# Optional: Alchemy API key for faster RPC access
-export ALCHEMY_API_KEY=your_key_here
-```
-
-### Custom RPC Endpoint
-
-Edit `polymarket/config.py`:
-
-```python
-RPC_ENDPOINTS = [
-    "https://polygon-rpc.com",
-    "your_custom_endpoint",
-]
-```
+- **Two Contracts Tracked**:
+  - `0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E` (CTF_EXCHANGE)
+  - `0xC5d563A36AE78145C45a50134d48A1215220f80a` (NEGRISK_CTF_EXCHANGE)
 
 ## Contributing
 
-We welcome contributions to improve the dataset and tools:
-
-1. **Report Issues**: Found bugs or data quality issues? [Open an issue](https://github.com/SII-WANGZJ/Polymarket_data/issues)
-2. **Suggest Features**: Ideas for new features? Let us know!
-3. **Contribute Code**: Improve our pipeline via pull requests
+1. **Report Issues**: [Open an issue](https://github.com/SII-WANGZJ/Polymarket_data/issues)
+2. **Contribute Code**: Improve our pipeline via pull requests
 
 ## License
 
-MIT License - Free for commercial and research use.
+MIT License — free for commercial and research use. See [LICENSE](LICENSE).
 
-See [LICENSE](LICENSE) file for details.
+## Contact
 
-## Contact & Support
+**Maintainer (this fork)**
+- **GitHub**: [tsaiyber](https://github.com/tsaiyber)
+- **Email**: [tsaiyber00001@gmail.com](mailto:tsaiyber00001@gmail.com)
 
+**Original Authors**
 - **Email**: [wangzhengjie@sii.edu.cn](mailto:wangzhengjie@sii.edu.cn)
 - **Issues**: [GitHub Issues](https://github.com/SII-WANGZJ/Polymarket_data/issues)
 - **Dataset**: [HuggingFace](https://huggingface.co/datasets/SII-WANGZJ/Polymarket_data)
 
 ## Citation
-
-If you use this dataset or toolkit in your research, please cite:
 
 ```bibtex
 @misc{polymarket_data_2026,
@@ -521,22 +385,9 @@ If you use this dataset or toolkit in your research, please cite:
 }
 ```
 
-## Acknowledgments
-
-- **Polymarket** for building the leading prediction market platform
-- **Polygon** for providing reliable blockchain infrastructure
-- **HuggingFace** for hosting and distributing large datasets
-- The open-source community for tools and libraries
-
-## Disclaimer
-
-This tool is for research and educational purposes. Users are responsible for complying with Polymarket's terms of service and applicable regulations.
-
 ---
 
 <div align="center">
-
-**Built for the research and data science community**
 
 [HuggingFace](https://huggingface.co/datasets/SII-WANGZJ/Polymarket_data) • [GitHub](https://github.com/SII-WANGZJ/Polymarket_data) • [Documentation](polymarket_data/DATA_DESCRIPTION.md)
 

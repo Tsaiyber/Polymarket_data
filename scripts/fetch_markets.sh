@@ -4,5 +4,5 @@
 set -e
 
 echo "Fetching market data from Gamma API..."
-python -m polymarket.cli fetch-markets
+uv run polymarket fetch-markets
 echo "✓ Market data fetched successfully"

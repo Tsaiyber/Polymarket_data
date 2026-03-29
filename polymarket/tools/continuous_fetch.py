@@ -278,7 +278,7 @@ class ContinuousFetcher:
             logger.info(f"  解码 {len(events)} 条事件")
 
             # 提取 trades
-            trades = extract_trades(events)
+            trades = extract_trades(events, self.token_mapping)
             logger.info(f"  提取 {len(trades)} 条交易")
 
             # 写入 orderfilled 和 trades
