@@ -1,0 +1,32 @@
+2026-03-30 00:03:57 [INFO] RPC 连接: https://polygon-mainnet.g.alchemy.com
+2026-03-30 00:03:59 [INFO] 获取区块 1 - 84840101 (共 84840101 个区块)
+2026-03-30 00:03:59 [WARNING] 市场文件不存在: E:\data\Trading\Polymarket_data\polymarket\data\dataset\markets.parquet
+2026-03-30 00:03:59 [INFO] 加载 0 个 token 映射
+2026-03-30 00:03:59 [INFO] 本次会话文件: session_20260330_000359
+2026-03-30 00:03:59 [INFO] 获取区块 1 - 100
+2026-03-30 00:04:03 [ERROR] 获取日志失败: 400 Client Error: Bad Request for url: https://polygon-mainnet.g.alchemy.com/v2/j4VUpx9yfM1cgUAC-w3kI
+2026-03-30 00:04:03 [WARNING] 记录失败区块: 1-100 (RPC失败)
+2026-03-30 00:04:03 [INFO] 获取区块 101 - 200
+2026-03-30 00:04:06 [ERROR] 获取日志失败: 400 Client Error: Bad Request for url: https://polygon-mainnet.g.alchemy.com/v2/j4VUpx9yfM1cgUAC-w3kI
+2026-03-30 00:04:06 [WARNING] 记录失败区块: 101-200 (RPC失败)
+2026-03-30 00:04:06 [INFO] 获取区块 201 - 300
+2026-03-30 00:04:10 [ERROR] 获取日志失败: 400 Client Error: Bad Request for url: https://polygon-mainnet.g.alchemy.com/v2/j4VUpx9yfM1cgUAC-w3kI
+2026-03-30 00:04:10 [WARNING] 记录失败区块: 201-300 (RPC失败)
+2026-03-30 00:04:10 [INFO] 获取区块 301 - 400
+2026-03-30 00:04:13 [ERROR] 获取日志失败: 400 Client Error: Bad Request for url: https://polygon-mainnet.g.alchemy.com/v2/j4VUpx9yfM1cgUAC-w3kI
+2026-03-30 00:04:13 [WARNING] 记录失败区块: 301-400 (RPC失败)
+2026-03-30 00:04:13 [INFO] 获取区块 401 - 500
+2026-03-30 00:04:17 [ERROR] 获取日志失败: 400 Client Error: Bad Request for url: https://polygon-mainnet.g.alchemy.com/v2/j4VUpx9yfM1cgUAC-w3kI
+2026-03-30 00:04:17 [WARNING] 记录失败区块: 401-500 (RPC失败)
+2026-03-30 00:04:17 [INFO] 获取区块 501 - 600
+2026-03-30 00:04:21 [ERROR] 获取日志失败: 400 Client Error: Bad Request for url: https://polygon-mainnet.g.alchemy.com/v2/j4VUpx9yfM1cgUAC-w3kI
+2026-03-30 00:04:21 [WARNING] 记录失败区块: 501-600 (RPC失败)
+2026-03-30 00:04:21 [INFO] 获取区块 601 - 700
+2026-03-30 00:04:24 [WARNING] 收到退出信号 (2)，将在当前批次完成后安全退出...
+2026-03-30 00:04:24 [WARNING] 收到退出信号 (2)，将在当前批次完成后安全退出...
+2026-03-30 00:04:25 [ERROR] 获取日志失败: 400 Client Error: Bad Request for url: https://polygon-mainnet.g.alchemy.com/v2/j4VUpx9yfM1cgUAC-w3kI
+2026-03-30 00:04:25 [WARNING] 记录失败区块: 601-700 (RPC失败)
+2026-03-30 00:04:25 [INFO] 收到退出信号，保存进度并退出...
+2026-03-30 00:04:25 [INFO] 链上数据获取完成, 新增: 事件 0, 交易 0, quant 0, users 0
+2026-03-30 00:04:25 [WARNING] ⚠️ 有 7 个区块批次获取失败，已记录到: E:\data\Trading\Polymarket_data\polymarket\data\failed_blocks_20260330_000359.txt
+2026-03-30 00:04:25 [INFO] 可以之后用 --range 参数补爬这些区块
