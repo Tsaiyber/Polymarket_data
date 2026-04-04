@@ -14,8 +14,8 @@ load_dotenv(Path(__file__).parent.parent / '.env')
 
 # ============== 路径 ==============
 
-# PROJECT_ROOT 指向 poly_onchain 目录本身
-PROJECT_ROOT = Path(__file__).parent
+# PROJECT_ROOT 指向项目根目录
+PROJECT_ROOT = Path(__file__).parent.parent
 DATA_DIR = PROJECT_ROOT / 'data'
 LOG_DIR = PROJECT_ROOT / 'logs'
 
@@ -71,7 +71,7 @@ GAMMA_API_URL = "https://gamma-api.polymarket.com"
 
 # ============== 处理参数 ==============
 
-BLOCKS_PER_BATCH = 100
+BLOCKS_PER_BATCH = 10
 REQUEST_DELAY = 0.2
 USDC_ASSET_ID = '0'
 
