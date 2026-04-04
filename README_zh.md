@@ -75,13 +75,15 @@ flowchart TD
         OF1 & OF2 & OF3 & OF4 --> MP1 --> OF
     end
 
-    subgraph S3["  第三步 · 增量热更新  "]
+    subgraph S3["  第三步 · 持续同步（日常使用）  "]
         direction TB
         BC[("⛓ Polygon 区块链\n通过 Alchemy RPC")]
+        SJ[("state.json\nlast_block + pending_blocks")]
         SS["orderfilled_session.parquet\n新区块数据"]
-        MP2["merge_parquet.py"]
+        MP2["merge_parquet.py\n--dedup"]
         OFU[("orderfilled.parquet\n已更新 ✓")]
-        BC -->|"fetch-onchain --continue"| SS
+        BC -->|"sync --alchemy\n① 重试 pending\n② 增量 fetch\n③ merge+去重"| SS
+        SJ <-->|记录断点 & 失败区块| SS
         OF -.->|作为基础| MP2
         SS --> MP2 --> OFU
     end
@@ -145,43 +147,38 @@ hf download SII-WANGZJ/Polymarket_data markets.parquet --repo-type dataset --loc
 HuggingFace 上的 `orderfilled` 分为 4 个分片，合并为单文件（流式处理，不会撑爆内存）：
 
 ```bash
-uv run python -m polymarket.tools.merge_parquet \
-  data/dataset/orderfilled1.parquet \
-  data/dataset/orderfilled2.parquet \
-  data/dataset/orderfilled3.parquet \
-  data/dataset/orderfilled4.parquet \
-  -o data/dataset/orderfilled.parquet \
-  --log-file logs/merge.log -y
+uv run python -m polymarket.tools.merge_parquet data/dataset/orderfilled1.parquet data/dataset/orderfilled2.parquet data/dataset/orderfilled3.parquet data/dataset/orderfilled4.parquet -o data/dataset/orderfilled.parquet --log-file logs/merge.log -y
 ```
 
-在后台运行，查看进度：
+查看进度：
 
 ```bash
+# Linux / macOS / Git Bash
 tail -f logs/merge.log
+
+# Windows PowerShell
+Get-Content logs/merge.log -Wait
 ```
 
-### 5. 增量热更新
+### 5. 持续同步（日常使用）
 
-从区块链抓取新区块，追加到本地数据：
+一条命令完成全部同步：**重试失败区块 → 增量 fetch 新区块 → merge 并去重**
 
 ```bash
-# 从上次断点继续抓取新区块
-uv run polymarket fetch-onchain --continue --alchemy
+uv run polymarket sync --alchemy
 ```
 
-执行后会生成 `data/dataset/orderfilled_session_<时间戳>.parquet`，将其合并进主文件：
+`sync` 命令自动完成三步：
 
-```bash
-uv run python -m polymarket.tools.merge_parquet \
-  data/dataset/orderfilled.parquet \
-  data/dataset/orderfilled_session_*.parquet \
-  -o data/dataset/orderfilled_new.parquet -y
+1. **重试 pending_blocks**：读取 `state.json` 中上次失败的区块范围，自适应批次重试（10→5→1 块/批，指数退避）
+2. **增量 fetch 新区块**：从上次断点（`state.json` 中的 `last_block`）抓到链头
+3. **merge + 去重**：将所有 session 文件合并进 `orderfilled.parquet`，自动过滤重复行
 
-# 替换主文件
-mv data/dataset/orderfilled_new.parquet data/dataset/orderfilled.parquet
-```
+`state.json` 作为单一状态源，记录：
+- `fetch_onchain.last_block`：上次成功处理到的区块
+- `pending_blocks`：历次 sync 中失败的区块范围，含累计尝试次数（历史遗留一目了然）
 
-同步更新市场元数据：
+同步市场元数据：
 
 ```bash
 uv run polymarket fetch-markets       # 获取新上线的市场
@@ -286,16 +283,19 @@ uv run polymarket clean
 ## 命令速查
 
 ```bash
+# ★ 日常维护：一条命令完成全部同步（推荐）
+uv run polymarket sync --alchemy
+
 # 获取新上线市场元数据
 uv run polymarket fetch-markets
 
 # 刷新未结算市场状态
 uv run polymarket update-markets
 
-# 从断点继续抓取新区块
+# 单独抓取链上数据（从断点继续）
 uv run polymarket fetch-onchain --continue --alchemy
 
-# 抓取指定区块范围
+# 单独抓取指定区块范围
 uv run polymarket fetch-onchain --range 80000000 80100000 --alchemy
 
 # 处理 orderfilled → trades
@@ -311,11 +311,14 @@ uv run polymarket clean
 # 合并多个 parquet 文件（流式，不占内存）
 uv run python -m polymarket.tools.merge_parquet file1.parquet file2.parquet -o merged.parquet
 
+# 合并时去重（适用于断点续传产生的 session 文件）
+uv run python -m polymarket.tools.merge_parquet file1.parquet file2.parquet -o merged.parquet --dedup
+
 # 按时间戳排序
 uv run python -m polymarket.tools.sort_parquet input.parquet -o sorted.parquet
 
-# 补抓失败区块
-uv run python -m polymarket.tools.refetch_failed_blocks --start 80000000 --end 80100000
+# 手动补抓失败区块（通常由 sync 自动处理，无需手动执行）
+uv run python -m polymarket.tools.refetch_failed_blocks data/failed_blocks_<timestamp>.txt --alchemy
 ```
 
 ## 项目结构

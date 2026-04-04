@@ -242,6 +242,68 @@ class LogFetcher:
         logger.info(f"总共获取 {len(all_records)} 条记录")
         return all_records
 
+    def fetch_with_adaptive_retry(
+        self,
+        start_block: int,
+        end_block: int,
+        batch_sizes: Optional[List[int]] = None,
+        max_retry: int = 3,
+    ) -> tuple:
+        """自适应批次重试：10→5→1 块/批，每档最多重试 max_retry 次（指数退避）
+
+        返回:
+            (all_logs, still_failed)
+            all_logs:     成功获取的记录列表
+            still_failed: 用尽所有策略仍失败的 (start, end) 列表
+        """
+        if batch_sizes is None:
+            batch_sizes = [10, 5, 1]
+
+        pending = [(start_block, end_block)]
+        all_logs = []
+
+        for tier_idx, batch_size in enumerate(batch_sizes):
+            next_pending = []
+
+            for (s, e) in pending:
+                cur = s
+                while cur <= e:
+                    sub_end = min(cur + batch_size - 1, e)
+                    success = False
+
+                    for attempt in range(max_retry):
+                        if attempt > 0:
+                            wait = 2 ** attempt  # 2s → 4s
+                            logger.info(f"  重试 {attempt}/{max_retry - 1}，等待 {wait}s...")
+                            time.sleep(wait)
+
+                        records = self.fetch_block_range(cur, sub_end)
+                        if records is not None:
+                            all_logs.extend(records)
+                            success = True
+                            break
+
+                    if not success:
+                        next_pending.append((cur, sub_end))
+
+                    cur = sub_end + 1
+                    if cur <= e:
+                        time.sleep(REQUEST_DELAY)
+
+            pending = next_pending
+            if not pending:
+                break  # 全部成功，不需要继续降级
+
+            next_tier = tier_idx + 1
+            if next_tier < len(batch_sizes):
+                logger.warning(f"  {len(pending)} 个子范围失败，降级到 {batch_sizes[next_tier]} 块/批")
+
+        if pending:
+            logger.warning(f"  {len(pending)} 个子范围用尽所有策略仍失败，将记入 pending_blocks")
+
+        logger.info(f"总共获取 {len(all_logs)} 条记录")
+        return all_logs, pending
+
     def get_latest_block(self) -> int:
         return self.client.get_latest_block()
 

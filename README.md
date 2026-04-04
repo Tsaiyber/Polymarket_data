@@ -81,13 +81,15 @@ flowchart TD
         OF1 & OF2 & OF3 & OF4 --> MP1 --> OF
     end
 
-    subgraph S3["  Step 3 · Hot Update  "]
+    subgraph S3["  Step 3 · Continuous Sync (daily use)  "]
         direction TB
         BC[("⛓ Polygon Blockchain\nvia Alchemy RPC")]
+        SJ[("state.json\nlast_block + pending_blocks")]
         SS["orderfilled_session.parquet\nnew blocks"]
-        MP2["merge_parquet.py"]
+        MP2["merge_parquet.py\n--dedup"]
         OFU[("orderfilled.parquet\nupdated ✓")]
-        BC -->|"fetch-onchain --continue"| SS
+        BC -->|"sync --alchemy\n① retry pending\n② incremental fetch\n③ merge+dedup"| SS
+        SJ <-->|checkpoint & failed blocks| SS
         OF -.->|base| MP2
         SS --> MP2 --> OFU
     end
@@ -151,41 +153,36 @@ hf download SII-WANGZJ/Polymarket_data markets.parquet --repo-type dataset --loc
 HuggingFace distributes `orderfilled` as 4 shards. Merge them into a single file (streaming, memory-safe):
 
 ```bash
-uv run python -m polymarket.tools.merge_parquet \
-  data/dataset/orderfilled1.parquet \
-  data/dataset/orderfilled2.parquet \
-  data/dataset/orderfilled3.parquet \
-  data/dataset/orderfilled4.parquet \
-  -o data/dataset/orderfilled.parquet \
-  --log-file logs/merge.log -y
+uv run python -m polymarket.tools.merge_parquet data/dataset/orderfilled1.parquet data/dataset/orderfilled2.parquet data/dataset/orderfilled3.parquet data/dataset/orderfilled4.parquet -o data/dataset/orderfilled.parquet --log-file logs/merge.log -y
 ```
 
-This runs in the background. Monitor progress:
+Monitor progress:
 
 ```bash
+# Linux / macOS / Git Bash
 tail -f logs/merge.log
+
+# Windows PowerShell
+Get-Content logs/merge.log -Wait
 ```
 
-### 5. Incremental Update
+### 5. Continuous Sync (daily use)
 
-Fetch new blocks from the blockchain and append to your local data:
+One command to do everything: **retry failed blocks → incremental fetch → merge with dedup**
 
 ```bash
-# Fetch new blocks since last checkpoint
-uv run polymarket fetch-onchain --continue --alchemy
+uv run polymarket sync --alchemy
 ```
 
-This produces a session file `data/dataset/orderfilled_session_<timestamp>.parquet`. Merge it into the main file:
+`sync` runs three steps automatically:
 
-```bash
-uv run python -m polymarket.tools.merge_parquet \
-  data/dataset/orderfilled.parquet \
-  data/dataset/orderfilled_session_*.parquet \
-  -o data/dataset/orderfilled_new.parquet -y
+1. **Retry pending_blocks**: reads failed block ranges from `state.json`, retries with adaptive batching (10→5→1 blocks/batch, exponential backoff)
+2. **Incremental fetch**: fetches from `last_block` (stored in `state.json`) to chain head
+3. **Merge + dedup**: merges all session files into `orderfilled.parquet`, deduplicates overlapping rows
 
-# Replace main file
-mv data/dataset/orderfilled_new.parquet data/dataset/orderfilled.parquet
-```
+`state.json` is the single source of truth:
+- `fetch_onchain.last_block`: last successfully processed block
+- `pending_blocks`: failed block ranges across sync runs, with cumulative attempt counts
 
 Also update market metadata:
 
@@ -292,13 +289,16 @@ uv run polymarket clean
 ## CLI Reference
 
 ```bash
+# ★ Daily maintenance: full sync in one command (recommended)
+uv run polymarket sync --alchemy
+
 # Fetch new market metadata
 uv run polymarket fetch-markets
 
 # Refresh states of unclosed markets
 uv run polymarket update-markets
 
-# Fetch new on-chain blocks (from last checkpoint)
+# Fetch new on-chain blocks manually (from last checkpoint)
 uv run polymarket fetch-onchain --continue --alchemy
 
 # Fetch specific block range
@@ -317,11 +317,14 @@ uv run polymarket clean
 # Merge multiple parquet files (streaming, memory-safe)
 uv run python -m polymarket.tools.merge_parquet file1.parquet file2.parquet -o merged.parquet
 
+# Merge with dedup (for session files from incremental fetches)
+uv run python -m polymarket.tools.merge_parquet file1.parquet file2.parquet -o merged.parquet --dedup
+
 # Sort parquet by timestamp
 uv run python -m polymarket.tools.sort_parquet input.parquet -o sorted.parquet
 
-# Refetch failed blocks
-uv run python -m polymarket.tools.refetch_failed_blocks --start 80000000 --end 80100000
+# Manually refetch failed blocks (normally handled automatically by sync)
+uv run python -m polymarket.tools.refetch_failed_blocks data/failed_blocks_<timestamp>.txt --alchemy
 ```
 
 ## Project Structure

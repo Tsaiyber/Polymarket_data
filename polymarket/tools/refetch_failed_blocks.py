@@ -49,10 +49,11 @@ def read_failed_blocks(failed_blocks_file):
 
 def main():
     if len(sys.argv) < 2:
-        print("用法: python scripts/refetch_failed_blocks.py <failed_blocks_file>")
-        print("示例: python scripts/refetch_failed_blocks.py data/failed_blocks_20251230_055516.txt")
+        print("用法: python scripts/refetch_failed_blocks.py <failed_blocks_file> [--alchemy]")
+        print("示例: python scripts/refetch_failed_blocks.py data/failed_blocks_20251230_055516.txt --alchemy")
         sys.exit(1)
 
+    use_alchemy = '--alchemy' in sys.argv
     failed_blocks_file = Path(sys.argv[1])
     if not failed_blocks_file.exists():
         logger.error(f"文件不存在: {failed_blocks_file}")
@@ -63,7 +64,7 @@ def main():
     logger.info(f"读取到 {len(failed_ranges)} 个失败区块范围")
 
     # 初始化
-    fetcher = LogFetcher()
+    fetcher = LogFetcher(use_alchemy=use_alchemy)
     decoder = EventDecoder()
 
     # 加载 token 映射
@@ -93,6 +94,7 @@ def main():
 
     failed_count = 0
     success_count = 0
+    still_failed = []  # 记录本次仍然失败的区块范围
 
     # 逐个补爬
     for idx, (start, end) in enumerate(failed_ranges, 1):
@@ -103,6 +105,7 @@ def main():
         if logs is None:
             logger.error(f"  ✗ RPC 请求失败")
             failed_count += 1
+            still_failed.append((start, end))
             continue
 
         if not logs:
@@ -139,6 +142,15 @@ def main():
 
         logger.info(f"  ✓ 获取 {len(formatted)} 条事件")
         success_count += 1
+
+    # 保存仍然失败的区块到新文件
+    if still_failed:
+        stem = failed_blocks_file.stem  # e.g. failed_blocks_20260330_001654
+        retry_file = failed_blocks_file.parent / f"{stem}_retry.txt"
+        with open(retry_file, 'w') as f:
+            for s, e in still_failed:
+                f.write(f"{s}-{e}\n")
+        logger.warning(f"仍有 {len(still_failed)} 个范围失败，已保存到: {retry_file}")
 
     # 保存数据
     logger.info(f"\n补爬完成: 成功 {success_count}, 失败 {failed_count}")

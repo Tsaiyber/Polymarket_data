@@ -10,8 +10,10 @@ polymarket 命令行工具
 """
 
 import argparse
+import glob
 import json
 import logging
+import shutil
 import sys
 import time
 from datetime import datetime
@@ -134,6 +136,66 @@ def save_last_block(block: int):
         json.dump(state, f, indent=2)
 
 
+def load_pending_blocks() -> list:
+    """从 state.json 读取 pending_blocks 列表"""
+    if not STATE_FILE.exists():
+        return []
+    try:
+        with open(STATE_FILE) as f:
+            state = json.load(f)
+        return state.get('pending_blocks', [])
+    except (json.JSONDecodeError, IOError):
+        return []
+
+
+def update_pending_blocks(newly_failed: list, newly_succeeded: list):
+    """更新 state.json 中的 pending_blocks
+
+    - 成功的删掉
+    - 失败的 attempts+1（新失败的插入，attempts=1）
+    - attempts > 1 说明跨多次 sync 仍未解决，属于历史遗留
+    """
+    state = {}
+    if STATE_FILE.exists():
+        try:
+            with open(STATE_FILE) as f:
+                state = json.load(f)
+        except (json.JSONDecodeError, IOError):
+            pass
+
+    pending = state.get('pending_blocks', [])
+    now = datetime.utcnow().isoformat()
+
+    # 移除已成功的
+    succeeded_set = {(s, e) for s, e in newly_succeeded}
+    pending = [p for p in pending if (p['start'], p['end']) not in succeeded_set]
+
+    # 新增/累加失败的
+    existing = {(p['start'], p['end']): p for p in pending}
+    for (s, e) in newly_failed:
+        key = (s, e)
+        if key in existing:
+            existing[key]['attempts'] += 1
+            existing[key]['last_tried'] = now
+        else:
+            pending.append({
+                'start': s,
+                'end': e,
+                'attempts': 1,
+                'first_failed': now,
+                'last_tried': now,
+            })
+
+    state['pending_blocks'] = pending
+    STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+    with open(STATE_FILE, 'w') as f:
+        json.dump(state, f, indent=2)
+
+    if newly_failed:
+        chronic = [p for p in pending if p['attempts'] > 1]
+        logger.warning(f"pending_blocks: 共 {len(pending)} 个，其中 {len(chronic)} 个历史遗留（attempts>1）")
+
+
 def cmd_fetch_onchain(args):
     """获取链上数据（增量模式）
 
@@ -243,7 +305,6 @@ def cmd_fetch_onchain(args):
 
     def merge_temp_files():
         """合并当前 session 文件到主文件（仅当前 session）"""
-        import shutil
         for temp_file, main_file in [
             (events_temp, DECODED_EVENTS_FILE),
             (trades_temp, TRADES_OUTPUT_FILE),
@@ -274,17 +335,8 @@ def cmd_fetch_onchain(args):
     total_users = 0
     batches_since_checkpoint = 0
 
-    # 记录失败的区块范围
-    failed_blocks_file = DATA_DIR / f'failed_blocks_{session_ts}.txt'
-    failed_count = 0
-
-    def record_failed_block(block_start, block_end, reason=""):
-        """记录失败的区块范围"""
-        nonlocal failed_count
-        with open(failed_blocks_file, 'a') as f:
-            f.write(f"{block_start}-{block_end}\n")
-        failed_count += 1
-        logger.warning(f"记录失败区块: {block_start}-{block_end} {reason}")
+    # 本次 session 新增的失败区块（将在结束时写入 state.json pending_blocks）
+    session_newly_failed = []
 
     try:
         while current <= end:
@@ -295,77 +347,82 @@ def cmd_fetch_onchain(args):
 
             batch_end = min(current + batch_size - 1, end)
 
-            logs = fetcher.fetch_range_in_batches(current, batch_end)
-            if logs is None:
-                # RPC 请求失败，记录并继续下一批
-                record_failed_block(current, batch_end, "(RPC失败)")
-                # 注意：这里不更新 last_saved_block，因为这批数据没有成功获取
+            # 自适应批次重试：10→5→1，每档最多 3 次（指数退避）
+            logs, still_failed = fetcher.fetch_with_adaptive_retry(current, batch_end)
+            if still_failed:
+                # 用尽所有策略仍失败，记入本次失败列表（session 结束后写入 pending_blocks）
+                session_newly_failed.extend(still_failed)
+                logger.warning(f"区块 {current}-{batch_end} 有 {len(still_failed)} 个子范围失败，记入 pending_blocks")
+                # 即使部分失败，已成功获取的 logs 仍然保留处理
+
+            if not logs:
+                # 完全没拿到数据（可能全部失败，或该区块范围本来就没有事件）
+                # 无论哪种情况，都必须推进 current，否则会无限循环
                 current = batch_end + 1
                 batches_since_checkpoint += 1
                 continue
 
-            # logs 是列表（可能为空，表示该区块范围没有交易事件）
-            if logs:
-                decoded = decoder.decode_batch(logs)
-                formatted = decoder.format_batch(decoded)
+            # logs 非空，处理事件
+            decoded = decoder.decode_batch(logs)
+            formatted = decoder.format_batch(decoded)
 
-                if formatted:
-                    # 新数据（只包含当前批次）
-                    new_df = pd.DataFrame(formatted)
-                    batch_events = len(new_df)
+            if formatted:
+                # 新数据（只包含当前批次）
+                new_df = pd.DataFrame(formatted)
+                batch_events = len(new_df)
 
-                    # 1. 写入 orderfilled（流式追加到临时文件）
-                    events_table = pa.Table.from_pandas(new_df, preserve_index=False)
-                    if events_writer is None:
-                        events_writer = pq.ParquetWriter(str(events_temp), events_table.schema, compression='snappy')
-                    events_writer.write_table(events_table)
-                    new_df.tail(1000).to_csv(ORDERFILLED_PREVIEW_FILE, index=False)
+                # 1. 写入 orderfilled（流式追加到临时文件）
+                events_table = pa.Table.from_pandas(new_df, preserve_index=False)
+                if events_writer is None:
+                    events_writer = pq.ParquetWriter(str(events_temp), events_table.schema, compression='snappy')
+                events_writer.write_table(events_table)
+                new_df.tail(1000).to_csv(ORDERFILLED_PREVIEW_FILE, index=False)
 
-                    # 2. 生成 trades
-                    events = new_df.to_dict('records')
-                    trades_df = extract_trades(events, token_mapping)
-                    batch_trades = 0
-                    batch_quant = 0
-                    batch_users = 0
+                # 2. 生成 trades
+                events = new_df.to_dict('records')
+                trades_df = extract_trades(events, token_mapping)
+                batch_trades = 0
+                batch_quant = 0
+                batch_users = 0
 
-                    if not trades_df.empty:
-                        batch_trades = len(trades_df)
+                if not trades_df.empty:
+                    batch_trades = len(trades_df)
 
-                        # 写入 trades
-                        trades_table = pa.Table.from_pandas(trades_df, preserve_index=False)
-                        if trades_writer is None:
-                            trades_writer = pq.ParquetWriter(str(trades_temp), trades_table.schema, compression='snappy')
-                        trades_writer.write_table(trades_table)
-                        trades_df.tail(1000).to_csv(TRADES_PREVIEW_FILE, index=False)
+                    # 写入 trades
+                    trades_table = pa.Table.from_pandas(trades_df, preserve_index=False)
+                    if trades_writer is None:
+                        trades_writer = pq.ParquetWriter(str(trades_temp), trades_table.schema, compression='snappy')
+                    trades_writer.write_table(trades_table)
+                    trades_df.tail(1000).to_csv(TRADES_PREVIEW_FILE, index=False)
 
-                        # 3. 生成 quant
-                        quant_df = clean_trades_df(trades_df)
-                        if not quant_df.empty:
-                            batch_quant = len(quant_df)
-                            quant_table = pa.Table.from_pandas(quant_df, preserve_index=False)
-                            if quant_writer is None:
-                                quant_writer = pq.ParquetWriter(str(quant_temp), quant_table.schema, compression='snappy')
-                            quant_writer.write_table(quant_table)
-                            quant_df.tail(1000).to_csv(QUANT_PREVIEW_FILE, index=False)
+                    # 3. 生成 quant
+                    quant_df = clean_trades_df(trades_df)
+                    if not quant_df.empty:
+                        batch_quant = len(quant_df)
+                        quant_table = pa.Table.from_pandas(quant_df, preserve_index=False)
+                        if quant_writer is None:
+                            quant_writer = pq.ParquetWriter(str(quant_temp), quant_table.schema, compression='snappy')
+                        quant_writer.write_table(quant_table)
+                        quant_df.tail(1000).to_csv(QUANT_PREVIEW_FILE, index=False)
 
-                        # 4. 生成 users
-                        users_df = clean_users_df(trades_df)
-                        if not users_df.empty:
-                            batch_users = len(users_df)
-                            users_table = pa.Table.from_pandas(users_df, preserve_index=False)
-                            if users_writer is None:
-                                users_writer = pq.ParquetWriter(str(users_temp), users_table.schema, compression='snappy')
-                            users_writer.write_table(users_table)
-                            users_df.tail(1000).to_csv(USERS_PREVIEW_FILE, index=False)
+                    # 4. 生成 users
+                    users_df = clean_users_df(trades_df)
+                    if not users_df.empty:
+                        batch_users = len(users_df)
+                        users_table = pa.Table.from_pandas(users_df, preserve_index=False)
+                        if users_writer is None:
+                            users_writer = pq.ParquetWriter(str(users_temp), users_table.schema, compression='snappy')
+                        users_writer.write_table(users_table)
+                        users_df.tail(1000).to_csv(USERS_PREVIEW_FILE, index=False)
 
-                    total_events += batch_events
-                    total_trades += batch_trades
-                    total_quant += batch_quant
-                    total_users += batch_users
+                total_events += batch_events
+                total_trades += batch_trades
+                total_quant += batch_quant
+                total_users += batch_users
 
-                    logger.info(f"区块 {current}-{batch_end}: "
-                               f"事件+{batch_events}, 交易+{batch_trades}, "
-                               f"quant+{batch_quant}, users+{batch_users}")
+                logger.info(f"区块 {current}-{batch_end}: "
+                           f"事件+{batch_events}, 交易+{batch_trades}, "
+                           f"quant+{batch_quant}, users+{batch_users}")
 
             last_saved_block = batch_end
             current = batch_end + 1
@@ -393,10 +450,10 @@ def cmd_fetch_onchain(args):
         logger.info(f"链上数据获取完成, 新增: 事件 {total_events}, 交易 {total_trades}, "
                    f"quant {total_quant}, users {total_users}")
 
-        # 报告失败统计
-        if failed_count > 0:
-            logger.warning(f"⚠️ 有 {failed_count} 个区块批次获取失败，已记录到: {failed_blocks_file}")
-            logger.info(f"可以之后用 --range 参数补爬这些区块")
+        # 将本次失败区块写入 state.json pending_blocks
+        if session_newly_failed:
+            update_pending_blocks(newly_failed=session_newly_failed, newly_succeeded=[])
+            logger.warning(f"⚠️ 共 {len(session_newly_failed)} 个子区块范围记入 pending_blocks，下次 sync 自动重试")
 
     except Exception as e:
         logger.error(f"获取链上数据出错: {e}")
@@ -849,14 +906,12 @@ def cmd_process_historical(args):
 
     def merge_session_files():
         """合并所有session文件到主文件"""
-        import glob as glob_module
-
         for main_file, pattern, output_dir in [
             (TRADES_OUTPUT_FILE, 'trades_session_*.parquet', DATASET_DIR),
             (QUANT_CLEAN_FILE, 'quant_session_*.parquet', DATA_CLEAN_DIR),
             (USERS_CLEAN_FILE, 'users_session_*.parquet', DATA_CLEAN_DIR)
         ]:
-            session_files = sorted(glob_module.glob(str(output_dir / pattern)))
+            session_files = sorted(glob.glob(str(output_dir / pattern)))
             if not session_files:
                 continue
 
@@ -869,7 +924,6 @@ def cmd_process_historical(args):
             if len(all_files) <= 1:
                 # 只有一个文件，如果是session文件就重命名为主文件
                 if session_files and not main_file.exists():
-                    import shutil
                     shutil.move(session_files[0], str(main_file))
                 continue
 
@@ -1167,7 +1221,6 @@ def cmd_update(args):
 
 def cmd_merge_sessions(args):
     """合并所有 session 文件到主文件"""
-    import glob as glob_module
     import gc
 
     logger.info("=== 合并 session 文件 ===")
@@ -1186,7 +1239,7 @@ def cmd_merge_sessions(args):
         (USERS_CLEAN_FILE, 'users_refetched_*.parquet', DATA_CLEAN_DIR, 'users_refetched'),
         (USERS_CLEAN_FILE, 'users_append.parquet', DATA_CLEAN_DIR, 'users_append'),
     ]:
-        session_files = sorted(glob_module.glob(str(output_dir / pattern)))
+        session_files = sorted(glob.glob(str(output_dir / pattern)))
         if not session_files:
             continue
 
@@ -1201,7 +1254,6 @@ def cmd_merge_sessions(args):
         if len(all_files) <= 1:
             # 只有一个文件，如果是session文件就重命名为主文件
             if session_files and not main_file.exists():
-                import shutil
                 shutil.move(session_files[0], str(main_file))
                 logger.info(f"移动 {session_files[0]} -> {main_file}")
             continue
@@ -1224,6 +1276,106 @@ def cmd_merge_sessions(args):
     logger.info("所有 session 文件合并完成!")
 
 
+def cmd_sync(args):
+    """
+    一条命令完成完整同步：
+      1. 重试 state.json 中的 pending_blocks（自适应批次）
+      2. 增量 fetch 新区块（chain head - last_block）
+      3. merge session 文件到主文件（带去重）
+    """
+    from ..tools.merge_parquet import merge_parquet_files
+
+    use_alchemy = args.alchemy
+    fetcher = LogFetcher(use_alchemy=use_alchemy)
+    decoder = EventDecoder()
+    token_mapping = load_token_mapping(MARKETS_FILE)
+    if MISSING_MARKETS_FILE.exists():
+        token_mapping.update(load_token_mapping(MISSING_MARKETS_FILE))
+
+    # ── Step 1: 重试 pending_blocks ──────────────────────────────────────
+    pending = load_pending_blocks()
+    if pending:
+        logger.info(f"=== Step 1: 重试 {len(pending)} 个 pending 区块 ===")
+        chronic = [p for p in pending if p['attempts'] > 1]
+        if chronic:
+            logger.warning(f"  其中 {len(chronic)} 个为历史遗留（attempts > 1）")
+
+        still_failing = []
+        succeeded = []
+        all_pending_formatted = []
+        for item in pending:
+            s, e = item['start'], item['end']
+            logs, still_failed = fetcher.fetch_with_adaptive_retry(s, e)
+            if still_failed:
+                still_failing.extend(still_failed)
+            else:
+                succeeded.append((s, e))
+                if logs:
+                    decoded = decoder.decode_batch(logs)
+                    formatted = decoder.format_batch(decoded)
+                    if formatted:
+                        all_pending_formatted.extend(formatted)
+
+        # 所有 pending 数据写入单个文件（避免同秒多文件冲突）
+        if all_pending_formatted:
+            session_ts = datetime.now().strftime('%Y%m%d_%H%M%S')
+            out = DATASET_DIR / f'orderfilled_pending_{session_ts}.parquet'
+            pd.DataFrame(all_pending_formatted).to_parquet(out, index=False, compression='snappy')
+            logger.info(f"  pending 数据已保存: {out.name} ({len(all_pending_formatted)} 行)")
+
+        update_pending_blocks(newly_failed=still_failing, newly_succeeded=succeeded)
+        logger.info(f"  Step 1 完成: {len(succeeded)} 个成功，{len(still_failing)} 个仍失败")
+    else:
+        logger.info("=== Step 1: 无 pending 区块，跳过 ===")
+
+    # ── Step 2: 增量 fetch 新区块 ────────────────────────────────────────
+    logger.info("=== Step 2: 增量 fetch 新区块 ===")
+    args.continue_from = True
+    args.blocks = None
+    args.range = None
+    args.merge = False  # merge 在 Step 3 单独做
+    cmd_fetch_onchain(args)
+
+    # ── Step 3: merge session 文件 ───────────────────────────────────────
+    logger.info("=== Step 3: merge session 文件 ===")
+    main_file = DECODED_EVENTS_FILE  # orderfilled.parquet
+
+    session_files = sorted(glob.glob(str(DATASET_DIR / 'orderfilled_session_*.parquet')))
+    pending_files = sorted(glob.glob(str(DATASET_DIR / 'orderfilled_pending_*.parquet')))
+    refetch_files = sorted(glob.glob(str(DATASET_DIR / 'orderfilled_refetched_*.parquet')))
+
+    new_files = session_files + pending_files + refetch_files
+    if not new_files:
+        logger.info("  没有新的 session 文件，跳过 merge")
+        return
+
+    logger.info(f"  待合并文件: {len(new_files)} 个")
+    out_file = str(main_file).replace('.parquet', '_synced.parquet')
+    success = merge_parquet_files(
+        [str(main_file)] + new_files,
+        out_file,
+        auto_yes=True,
+        dedup=True,
+    )
+    if success:
+        shutil.move(out_file, str(main_file))
+        logger.info(f"  ✓ merge 完成，主文件已更新: {main_file.name}")
+        # 删除已合并的 session 文件
+        for f in new_files:
+            Path(f).unlink(missing_ok=True)
+        logger.info(f"  ✓ 已清理 {len(new_files)} 个 session 文件")
+    else:
+        logger.error("  merge 失败，session 文件保留")
+
+    logger.info("=== sync 完成 ===")
+    # 打印 pending 概况
+    remaining = load_pending_blocks()
+    if remaining:
+        logger.warning(f"仍有 {len(remaining)} 个 pending 区块未解决（下次 sync 自动重试）")
+        for p in remaining:
+            logger.warning(f"  {p['start']}-{p['end']}  attempts={p['attempts']}  last_tried={p['last_tried']}")
+
+
 def main():
     parser = argparse.ArgumentParser(description='Polymarket 数据工具')
     parser.add_argument('-v', '--verbose', action='store_true')
@@ -1237,6 +1389,10 @@ def main():
     p1.add_argument('-a', '--alchemy', action='store_true')
     p1.add_argument('-m', '--merge', action='store_true',
                     help='完成后合并临时文件到主文件（默认不合并）')
+
+    # sync（推荐日常使用）
+    p_sync = subparsers.add_parser('sync', help='完整同步：重试pending + 增量fetch + merge')
+    p_sync.add_argument('-a', '--alchemy', action='store_true', help='使用 Alchemy RPC')
 
     # fetch-markets
     p2 = subparsers.add_parser('fetch-markets', help='增量获取新市场')
@@ -1288,7 +1444,9 @@ def main():
     args = parser.parse_args()
     setup_logging(args.verbose)
 
-    if args.command == 'fetch-onchain':
+    if args.command == 'sync':
+        cmd_sync(args)
+    elif args.command == 'fetch-onchain':
         cmd_fetch_onchain(args)
     elif args.command == 'fetch-markets':
         cmd_fetch_markets(args)

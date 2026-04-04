@@ -14,6 +14,7 @@ nohup python scripts/merge_parquet.py \
 import sys
 import argparse
 from pathlib import Path
+from collections import deque
 import pyarrow as pa
 import pyarrow.parquet as pq
 import logging
@@ -26,7 +27,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-def merge_parquet_files(input_files, output_file, dry_run=False, auto_yes=False):
+def merge_parquet_files(input_files, output_file, dry_run=False, auto_yes=False, dedup=False):
     """
     合并多个 parquet 文件
 
@@ -35,6 +36,7 @@ def merge_parquet_files(input_files, output_file, dry_run=False, auto_yes=False)
         output_file: 输出文件路径
         dry_run: 是否只显示信息不实际合并
         auto_yes: 自动确认覆盖
+        dedup: 是否去重（基于 transaction_hash + log_index）
     """
     # 验证输入文件
     valid_files = []
@@ -83,69 +85,124 @@ def merge_parquet_files(input_files, output_file, dry_run=False, auto_yes=False)
 
     # 合并文件（流式写入 + 分批读取）
     logger.info(f"\n=== 开始合并（流式写入 + 分批读取）===")
+    if dedup:
+        logger.info("去重模式已开启（基于 transaction_hash + log_index）")
     output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    # 去重状态：滑动窗口，保留最近 200,000 行的键（覆盖约 1,200 个区块的重叠）
+    DEDUP_COLS = ['transaction_hash', 'log_index']
+    DEDUP_WINDOW_SIZE = 200_000
+    seen_keys_queue: deque[str] = deque()
+    seen_keys: set[str] = set()
+    total_duplicates = 0
+
+    def _make_key_series(df):
+        """将 transaction_hash + log_index 合成为字符串键"""
+        available = [c for c in DEDUP_COLS if c in df.columns]
+        if not available:
+            return None
+        key = df[available[0]].astype(str)
+        for col in available[1:]:
+            key = key + '|' + df[col].astype(str)
+        return key
+
+    def _dedup_batch(table: pa.Table) -> pa.Table:
+        """过滤掉已见过的行，并将新行加入滑动窗口"""
+        nonlocal total_duplicates
+        import pandas as pd
+        df = table.to_pandas()
+        key_series = _make_key_series(df)
+        if key_series is None:
+            return table  # 无法去重，跳过
+
+        mask = ~key_series.isin(seen_keys)
+        removed = int((~mask).sum())
+        if removed:
+            total_duplicates += removed
+            logger.info(f"  去重: 移除 {removed:,} 条重复行")
+            df = df[mask]
+            key_series = key_series[mask]
+
+        # 批量更新滑动窗口：先淘汰超出容量的旧键，再批量追加新键
+        new_keys = key_series.tolist()
+        overflow = len(seen_keys_queue) + len(new_keys) - DEDUP_WINDOW_SIZE
+        if overflow > 0:
+            for _ in range(min(overflow, len(seen_keys_queue))):
+                seen_keys.discard(seen_keys_queue[0])
+                seen_keys_queue.popleft()
+        seen_keys_queue.extend(new_keys)
+        seen_keys.update(new_keys)
+
+        if df.empty:
+            return None
+        return pa.Table.from_pandas(df, schema=table.schema, preserve_index=False)
 
     try:
         writer = None
+        target_schema = None
         total_rows_written = 0
         batch_size = 500000  # 每批读取 50 万行，减少内存占用
 
         for i, file_path in enumerate(valid_files, 1):
             logger.info(f"[{i}/{len(valid_files)}] 处理 {Path(file_path).name}")
 
-            # 打开 parquet 文件
             parquet_file = pq.ParquetFile(file_path)
             file_rows = 0
 
             # 第一次创建 writer（需要读取第一批数据获取 schema）
             if writer is None:
-                # 创建迭代器
                 batch_iter = parquet_file.iter_batches(batch_size=batch_size)
-                # 读取第一批获取 schema
                 first_batch = next(batch_iter)
                 target_schema = first_batch.schema
                 writer = pq.ParquetWriter(output_file, target_schema, compression='snappy')
-                writer.write_batch(first_batch)
-                file_rows += len(first_batch)
-                total_rows_written += len(first_batch)
-                logger.info(f"  已写入第 1 批: {len(first_batch):,} 行")
 
-                # 继续处理剩余批次（使用同一个迭代器）
+                # 处理第一批
+                table = pa.Table.from_batches([first_batch])
+                if dedup:
+                    table = _dedup_batch(table)
+                if table is not None and len(table) > 0:
+                    writer.write_table(table)
+                    file_rows += len(table)
+                    total_rows_written += len(table)
+                logger.info(f"  已写入第 1 批: {len(table) if table is not None else 0:,} 行")
+
                 batch_num = 2
                 for batch in batch_iter:
-                    writer.write_batch(batch)
-                    file_rows += len(batch)
-                    total_rows_written += len(batch)
-                    logger.info(f"  已写入第 {batch_num} 批: {len(batch):,} 行（累计 {total_rows_written:,} 行）")
+                    table = pa.Table.from_batches([batch])
+                    if dedup:
+                        table = _dedup_batch(table)
+                    if table is not None and len(table) > 0:
+                        writer.write_table(table)
+                        file_rows += len(table)
+                        total_rows_written += len(table)
+                    logger.info(f"  已写入第 {batch_num} 批: {len(table) if table is not None else 0:,} 行（累计 {total_rows_written:,} 行）")
                     batch_num += 1
             else:
                 # 后续文件：统一 schema 后分批写入
                 batch_num = 1
                 for batch in parquet_file.iter_batches(batch_size=batch_size):
-                    # 将 batch 转换为目标 schema
                     table = pa.Table.from_batches([batch])
-                    # 尝试转换到目标 schema（会自动处理类型转换）
                     try:
                         table = table.cast(target_schema)
-                    except Exception as e:
-                        # 如果自动转换失败，使用 pandas 转换
+                    except Exception:
                         import pandas as pd
                         df = table.to_pandas()
-                        # 转换类型
                         for field in target_schema:
                             if field.name in df.columns:
                                 if pa.types.is_string(field.type):
                                     df[field.name] = df[field.name].astype(str)
                                 elif pa.types.is_integer(field.type):
                                     df[field.name] = pd.to_numeric(df[field.name], errors='coerce').fillna(0).astype('int64')
-                        table = pa.Table.from_pandas(df, schema=target_schema)
+                        table = pa.Table.from_pandas(df, schema=target_schema, preserve_index=False)
 
-                    batch = table.to_batches()[0]
-                    writer.write_batch(batch)
-                    file_rows += len(batch)
-                    total_rows_written += len(batch)
-                    if batch_num % 10 == 0 or len(batch) < batch_size:  # 每 10 批或最后一批输出
-                        logger.info(f"  已写入第 {batch_num} 批: {len(batch):,} 行（累计 {total_rows_written:,} 行）")
+                    if dedup:
+                        table = _dedup_batch(table)
+                    if table is not None and len(table) > 0:
+                        writer.write_table(table)
+                        file_rows += len(table)
+                        total_rows_written += len(table)
+                    if batch_num % 10 == 0 or (table is None or len(table) < batch_size):
+                        logger.info(f"  已写入第 {batch_num} 批: {len(table) if table is not None else 0:,} 行（累计 {total_rows_written:,} 行）")
                     batch_num += 1
 
             logger.info(f"  ✓ 文件完成，共 {file_rows:,} 行")
@@ -158,6 +215,8 @@ def merge_parquet_files(input_files, output_file, dry_run=False, auto_yes=False)
         logger.info(f"\n=== 合并完成 ===")
         logger.info(f"输出文件: {output_file}")
         logger.info(f"总行数: {total_rows_written:,}")
+        if dedup and total_duplicates:
+            logger.info(f"去重移除: {total_duplicates:,} 条重复行")
         logger.info(f"文件大小: {output_size_mb:.1f} MB")
 
         return True
@@ -216,6 +275,12 @@ def main():
         help='自动确认覆盖，不询问（用于 nohup 运行）'
     )
 
+    parser.add_argument(
+        '--dedup',
+        action='store_true',
+        help='去重：基于 transaction_hash + log_index 过滤重复行（用于合并断点续传的 session 文件）'
+    )
+
     args = parser.parse_args()
 
     # 如果指定了日志文件，重新配置 logging
@@ -246,7 +311,7 @@ def main():
         logger.error("没有输入文件")
         sys.exit(1)
 
-    success = merge_parquet_files(input_files, args.output, args.dry_run, args.yes)
+    success = merge_parquet_files(input_files, args.output, args.dry_run, args.yes, args.dedup)
     sys.exit(0 if success else 1)
 
 
