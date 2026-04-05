@@ -30,16 +30,29 @@ from ..config import (
     TRADES_OUTPUT_FILE, TRADES_PREVIEW_FILE,
     MARKETS_PREVIEW_FILE, ORDERFILLED_PREVIEW_FILE,
     USERS_CLEAN_FILE, QUANT_CLEAN_FILE,
-    USERS_PREVIEW_FILE, QUANT_PREVIEW_FILE
+    USERS_PREVIEW_FILE, QUANT_PREVIEW_FILE,
+    CRYPTO_MARKET_IDS_FILE, CRYPTO_KEYWORDS,
 )
 from ..fetchers import LogFetcher, GammaApiClient
 from ..processors import (
     EventDecoder, extract_trades,
-    load_token_mapping, find_missing_tokens, save_preview_csv,
+    load_token_mapping, load_crypto_market_ids,
+    find_missing_tokens, save_preview_csv,
     clean_users, clean_trades, clean_users_df, clean_trades_df
 )
 
 logger = logging.getLogger(__name__)
+
+# 加密市场 ID 集合（懒加载，None = 未初始化，set() = 空集合，有内容 = 已加载）
+_crypto_ids_cache = None
+
+
+def get_crypto_ids():
+    """获取加密市场 ID 集合（懒加载，有缓存）。返回 None 表示未启用过滤。"""
+    global _crypto_ids_cache
+    if _crypto_ids_cache is None:
+        _crypto_ids_cache = load_crypto_market_ids() or False  # False 表示文件不存在
+    return _crypto_ids_cache if _crypto_ids_cache is not False else None
 
 
 def setup_logging(verbose: bool = False):
@@ -258,10 +271,14 @@ def cmd_fetch_onchain(args):
     DATA_CLEAN_DIR.mkdir(parents=True, exist_ok=True)
 
     # 加载 token 映射（用于生成 trades）
-    token_mapping = load_token_mapping(MARKETS_FILE)
+    crypto_ids = get_crypto_ids()
+    token_mapping = load_token_mapping(MARKETS_FILE, crypto_ids=crypto_ids)
     if MISSING_MARKETS_FILE.exists():
-        token_mapping.update(load_token_mapping(MISSING_MARKETS_FILE))
-    logger.info(f"加载 {len(token_mapping)} 个 token 映射")
+        token_mapping.update(load_token_mapping(MISSING_MARKETS_FILE, crypto_ids=crypto_ids))
+    if crypto_ids:
+        logger.info(f"加载 {len(token_mapping)} 个 token 映射（加密市场过滤已启用）")
+    else:
+        logger.info(f"加载 {len(token_mapping)} 个 token 映射")
 
     # 安全退出标志
     stop_requested = False
@@ -380,7 +397,7 @@ def cmd_fetch_onchain(args):
 
                 # 2. 生成 trades
                 events = new_df.to_dict('records')
-                trades_df = extract_trades(events, token_mapping)
+                trades_df = extract_trades(events, token_mapping, crypto_only=crypto_ids is not None)
                 batch_trades = 0
                 batch_quant = 0
                 batch_users = 0
@@ -816,10 +833,14 @@ def cmd_process_historical(args):
 
     # 1. 加载 token 映射
     logger.info("加载 token 映射...")
-    token_mapping = load_token_mapping(MARKETS_FILE)
+    crypto_ids = get_crypto_ids()
+    token_mapping = load_token_mapping(MARKETS_FILE, crypto_ids=crypto_ids)
     if MISSING_MARKETS_FILE.exists():
-        token_mapping.update(load_token_mapping(MISSING_MARKETS_FILE))
-    logger.info(f"共 {len(token_mapping)} 个 token 映射")
+        token_mapping.update(load_token_mapping(MISSING_MARKETS_FILE, crypto_ids=crypto_ids))
+    if crypto_ids:
+        logger.info(f"共 {len(token_mapping)} 个 token 映射（加密市场过滤已启用）")
+    else:
+        logger.info(f"共 {len(token_mapping)} 个 token 映射")
 
     # 2. 获取总行数
     parquet_file = pq.ParquetFile(DECODED_EVENTS_FILE)
@@ -968,7 +989,7 @@ def cmd_process_historical(args):
 
             # 生成 trades
             events = batch_df.to_dict('records')
-            trades_df = extract_trades(events, token_mapping)
+            trades_df = extract_trades(events, token_mapping, crypto_only=crypto_ids is not None)
 
             batch_quant = 0
             batch_users = 0
@@ -1072,11 +1093,12 @@ def cmd_process(args):
 
     # 1. 加载 token 映射
     logger.info("加载 token 映射...")
-    token_mapping = load_token_mapping(MARKETS_FILE)
+    crypto_ids = get_crypto_ids()
+    token_mapping = load_token_mapping(MARKETS_FILE, crypto_ids=crypto_ids)
 
     # 也加载缺失市场文件
     if MISSING_MARKETS_FILE.exists():
-        missing_mapping = load_token_mapping(MISSING_MARKETS_FILE)
+        missing_mapping = load_token_mapping(MISSING_MARKETS_FILE, crypto_ids=crypto_ids)
         token_mapping.update(missing_mapping)
         logger.info(f"合并缺失市场映射，共 {len(token_mapping)} 个 token")
 
@@ -1086,14 +1108,14 @@ def cmd_process(args):
     events = df.to_dict('records')
 
     logger.info("提取交易...")
-    trades_df = extract_trades(events, token_mapping)
+    trades_df = extract_trades(events, token_mapping, crypto_only=crypto_ids is not None)
 
     if trades_df.empty:
         logger.info("没有交易数据")
         return
 
-    # 3. 查找并补全缺失 token
-    missing_tokens = find_missing_tokens(trades_df, token_mapping)
+    # 3. 查找并补全缺失 token（crypto_only 模式下不需要，因为非加密 token 是有意跳过的）
+    missing_tokens = set() if crypto_ids else find_missing_tokens(trades_df, token_mapping)
     if missing_tokens and not getattr(args, 'skip_missing', False):
         logger.info(f"补全 {len(missing_tokens)} 个缺失 token...")
         client = GammaApiClient()
@@ -1121,7 +1143,7 @@ def cmd_process(args):
 
             # 重新提取交易（带完整映射）
             logger.info("重新提取交易...")
-            trades_df = extract_trades(events, token_mapping)
+            trades_df = extract_trades(events, token_mapping, crypto_only=crypto_ids is not None)
 
     # 4. 保存结果
     TRADES_OUTPUT_FILE.parent.mkdir(parents=True, exist_ok=True)
@@ -1219,6 +1241,63 @@ def cmd_update(args):
     logger.info("\n全量更新完成!")
 
 
+def cmd_build_crypto_filter(args):
+    """
+    从 markets.parquet 生成加密市场 ID 列表，保存到 data/crypto_market_ids.txt。
+    文件存在后，所有命令（sync/fetch-onchain/process）自动只处理加密市场。
+    """
+    import re
+
+    if not MARKETS_FILE.exists():
+        logger.error(f"markets.parquet 不存在: {MARKETS_FILE}，请先运行 fetch-markets")
+        return
+
+    logger.info("=== 生成加密市场过滤列表 ===")
+
+    # 构建关键词正则（匹配 event_slug / event_title 中的词）
+    pattern = re.compile(
+        r'\b(?:' + '|'.join(re.escape(k) for k in CRYPTO_KEYWORDS) + r')\b',
+        re.IGNORECASE
+    )
+
+    logger.info(f"关键词数量: {len(CRYPTO_KEYWORDS)}")
+    logger.info("读取 markets.parquet...")
+
+    df = pq.read_table(
+        MARKETS_FILE,
+        columns=['id', 'event_slug', 'event_title', 'question']
+    ).to_pandas()
+
+    logger.info(f"总市场数: {len(df):,}")
+
+    # 匹配：event_slug 或 event_title 含加密关键词
+    slug_match = df['event_slug'].fillna('').str.lower().str.contains(pattern, regex=True)
+    title_match = df['event_title'].fillna('').str.lower().str.contains(pattern, regex=True)
+    crypto_df = df[slug_match | title_match]
+
+    # 如果指定了 --preview，只显示不写入
+    if getattr(args, 'preview', False):
+        logger.info(f"\n匹配到 {len(crypto_df):,} 个加密市场（预览模式，不写入文件）")
+        logger.info("样例 event_slug:")
+        for slug in crypto_df['event_slug'].value_counts().head(20).index:
+            logger.info(f"  {slug}")
+        return
+
+    # 写入文件
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    with open(CRYPTO_MARKET_IDS_FILE, 'w') as f:
+        for market_id in crypto_df['id']:
+            f.write(str(market_id) + '\n')
+
+    logger.info(f"✓ 写入 {len(crypto_df):,} 个加密市场 ID → {CRYPTO_MARKET_IDS_FILE}")
+    logger.info(f"  占全部市场的 {len(crypto_df)/len(df)*100:.1f}%")
+    logger.info("加密市场过滤已启用，下次 sync/fetch-onchain/process 将自动生效")
+
+    # 清空缓存，让下次调用重新加载
+    global _crypto_ids_cache
+    _crypto_ids_cache = None
+
+
 def cmd_merge_sessions(args):
     """合并所有 session 文件到主文件"""
     import gc
@@ -1288,9 +1367,12 @@ def cmd_sync(args):
     use_alchemy = args.alchemy
     fetcher = LogFetcher(use_alchemy=use_alchemy)
     decoder = EventDecoder()
-    token_mapping = load_token_mapping(MARKETS_FILE)
+    crypto_ids = get_crypto_ids()
+    token_mapping = load_token_mapping(MARKETS_FILE, crypto_ids=crypto_ids)
     if MISSING_MARKETS_FILE.exists():
-        token_mapping.update(load_token_mapping(MISSING_MARKETS_FILE))
+        token_mapping.update(load_token_mapping(MISSING_MARKETS_FILE, crypto_ids=crypto_ids))
+    if crypto_ids:
+        logger.info(f"加密市场过滤已启用（{len(crypto_ids):,} 个市场）")
 
     # ── Step 1: 重试 pending_blocks ──────────────────────────────────────
     pending = load_pending_blocks()
@@ -1441,11 +1523,23 @@ def main():
     # merge-sessions
     p8 = subparsers.add_parser('merge-sessions', help='合并所有 session 文件到主文件')
 
+    # build-crypto-filter
+    p_crypto = subparsers.add_parser(
+        'build-crypto-filter',
+        help='生成加密市场 ID 列表（启用后 sync/process 只处理加密市场）'
+    )
+    p_crypto.add_argument(
+        '--preview', action='store_true',
+        help='只预览匹配结果，不写入文件'
+    )
+
     args = parser.parse_args()
     setup_logging(args.verbose)
 
     if args.command == 'sync':
         cmd_sync(args)
+    elif args.command == 'build-crypto-filter':
+        cmd_build_crypto_filter(args)
     elif args.command == 'fetch-onchain':
         cmd_fetch_onchain(args)
     elif args.command == 'fetch-markets':

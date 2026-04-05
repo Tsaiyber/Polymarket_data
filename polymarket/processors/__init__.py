@@ -10,6 +10,7 @@ from .decoder import EventDecoder
 from .trades import (
     extract_trades,
     load_token_mapping,
+    load_crypto_market_ids,
     find_missing_tokens,
     save_preview_csv,
     TradeBuilder,
@@ -21,6 +22,7 @@ __all__ = [
     'EventDecoder',
     'extract_trades',
     'load_token_mapping',
+    'load_crypto_market_ids',
     'find_missing_tokens',
     'save_preview_csv',
     'TradeBuilder',

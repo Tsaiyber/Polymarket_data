@@ -11,11 +11,13 @@
 """
 
 import logging
+import re
+from pathlib import Path
 from typing import Dict, List, Any, Optional, Set
 
 import pandas as pd
 
-from ..config import MARKETS_FILE
+from ..config import MARKETS_FILE, CRYPTO_MARKET_IDS_FILE, CRYPTO_KEYWORDS
 
 logger = logging.getLogger(__name__)
 
@@ -26,7 +28,11 @@ USDC_DECIMALS = 10 ** 6
 EXCHANGE_CONTRACTS = {'CTF_EXCHANGE', 'NEGRISK_CTF_EXCHANGE'}
 
 
-def extract_trades(events: List[Dict[str, Any]], token_mapping: Optional[Dict[str, Dict]] = None) -> pd.DataFrame:
+def extract_trades(
+    events: List[Dict[str, Any]],
+    token_mapping: Optional[Dict[str, Dict]] = None,
+    crypto_only: bool = False,
+) -> pd.DataFrame:
     """
     从事件中提取交易数据
 
@@ -37,6 +43,7 @@ def extract_trades(events: List[Dict[str, Any]], token_mapping: Optional[Dict[st
     Args:
         events: 解码后的事件列表
         token_mapping: token_id -> {market_id, condition_id, side, question} 映射
+        crypto_only: 为 True 时跳过无法匹配到 market_id 的交易（即非加密市场）
     """
     trades = []
 
@@ -55,9 +62,12 @@ def extract_trades(events: List[Dict[str, Any]], token_mapping: Optional[Dict[st
         # 解析交易
         trade = _parse_order_filled(event, token_mapping)
         if trade:
+            # crypto_only 模式：跳过未匹配到市场的交易（市场不在加密过滤集内）
+            if crypto_only and not trade.get('market_id'):
+                continue
             trades.append(trade)
 
-    logger.info(f"提取 {len(trades)} 条交易")
+    logger.info(f"提取 {len(trades)} 条交易{'（仅加密市场）' if crypto_only else ''}")
 
     if not trades:
         return pd.DataFrame()
@@ -165,9 +175,27 @@ def _parse_order_filled(event: Dict, token_mapping: Optional[Dict[str, Dict]] = 
     }
 
 
-def load_token_mapping(markets_file=None) -> Dict[str, Dict]:
+def load_crypto_market_ids(crypto_ids_file=None) -> Optional[Set[str]]:
+    """
+    读取加密市场 ID 集合。文件不存在时返回 None（不过滤）。
+    """
+    if crypto_ids_file is None:
+        crypto_ids_file = CRYPTO_MARKET_IDS_FILE
+    if not Path(crypto_ids_file).exists():
+        return None
+    with open(crypto_ids_file) as f:
+        ids = {line.strip() for line in f if line.strip()}
+    logger.info(f"加密市场过滤已启用：{len(ids):,} 个市场")
+    return ids
+
+
+def load_token_mapping(markets_file=None, crypto_ids: Optional[Set[str]] = None) -> Dict[str, Dict]:
     """
     从 markets parquet 加载 token 映射
+
+    Args:
+        markets_file: markets.parquet 路径
+        crypto_ids: 如果提供，只加载这些 market_id 的 token（加密货币过滤）
 
     返回: token_id -> {market_id, condition_id, side, question}
     """
@@ -186,6 +214,8 @@ def load_token_mapping(markets_file=None) -> Dict[str, Dict]:
         mapping = {}
 
         for _, row in df.iterrows():
+            if crypto_ids is not None and str(row.get('id', '')) not in crypto_ids:
+                continue
             market_id = str(row.get('id', ''))
             condition_id = str(row.get('condition_id', ''))
             question = str(row.get('question', ''))[:100]  # 截断过长的问题
