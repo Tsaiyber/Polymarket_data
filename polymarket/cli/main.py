@@ -1337,19 +1337,25 @@ def cmd_merge_sessions(args):
                 logger.info(f"移动 {session_files[0]} -> {main_file}")
             continue
 
-        # 合并所有文件
+        # 流式合并（避免一次性读入大文件）
         logger.info(f"合并 {len(all_files)} 个文件到 {main_file.name}...")
-        tables = [pq.read_table(f) for f in all_files]
-        combined = pa.concat_tables(tables)
-        pq.write_table(combined, main_file, compression='snappy')
-        logger.info(f"合并完成，共 {combined.num_rows:,} 行")
+        schema = pq.read_schema(all_files[0])
+        temp_file = str(main_file) + '.tmp'
+        total_rows = 0
+        with pq.ParquetWriter(temp_file, schema, compression='snappy') as writer:
+            for f in all_files:
+                pf = pq.ParquetFile(f)
+                for batch in pf.iter_batches(batch_size=200_000):
+                    writer.write_batch(batch)
+                    total_rows += batch.num_rows
+        shutil.move(temp_file, str(main_file))
+        logger.info(f"合并完成，共 {total_rows:,} 行")
 
         # 删除session文件
         for sf in session_files:
             Path(sf).unlink()
             logger.info(f"删除 {sf}")
 
-        del tables, combined
         gc.collect()
 
     logger.info("所有 session 文件合并完成!")
