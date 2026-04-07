@@ -1463,11 +1463,14 @@ def cmd_sync(args):
         logger.info("=== sync 完成（跳过 process/clean）===")
         return
 
-    # ── Step 4: 更新市场元数据 ───────────────────────────────────────────
+    # ── Step 4: 更新市场元数据 + 重建过滤列表 ──────────────────────────────
     logger.info("=== Step 4: 更新市场元数据 ===")
     args.continue_from = True
     cmd_fetch_markets(args)
     cmd_update_markets(args)
+    logger.info("=== Step 4b: 重建 updown_market_ids.txt ===")
+    args.preview = False
+    cmd_build_crypto_filter(args)
 
     # ── Step 5: process orderfilled → trades ────────────────────────────
     logger.info("=== Step 5: process-historical（orderfilled → trades）===")
