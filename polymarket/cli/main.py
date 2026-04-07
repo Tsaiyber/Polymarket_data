@@ -1455,13 +1455,36 @@ def cmd_sync(args):
     else:
         logger.error("  merge 失败，session 文件保留")
 
-    logger.info("=== sync 完成 ===")
     # 打印 pending 概况
     remaining = load_pending_blocks()
     if remaining:
         logger.warning(f"仍有 {len(remaining)} 个 pending 区块未解决（下次 sync 自动重试）")
         for p in remaining:
             logger.warning(f"  {p['start']}-{p['end']}  attempts={p['attempts']}  last_tried={p['last_tried']}")
+
+    if getattr(args, 'no_process', False):
+        logger.info("=== sync 完成（跳过 process/clean）===")
+        return
+
+    # ── Step 4: 更新市场元数据 ───────────────────────────────────────────
+    logger.info("=== Step 4: 更新市场元数据 ===")
+    args.continue_from = True
+    cmd_fetch_markets(args)
+    cmd_update_markets(args)
+
+    # ── Step 5: process orderfilled → trades ────────────────────────────
+    logger.info("=== Step 5: process-historical（orderfilled → trades）===")
+    args.batch_size = getattr(args, 'batch_size', 1_000_000)
+    args.test_batches = None
+    args.continue_from = False
+    cmd_process_historical(args)
+
+    # ── Step 6: clean trades → quant + users ────────────────────────────
+    logger.info("=== Step 6: clean（trades → quant + users）===")
+    args.test = None
+    cmd_clean(args)
+
+    logger.info("=== sync 全流程完成 ===")
 
 
 def main():
@@ -1479,8 +1502,9 @@ def main():
                     help='完成后合并临时文件到主文件（默认不合并）')
 
     # sync（推荐日常使用）
-    p_sync = subparsers.add_parser('sync', help='完整同步：重试pending + 增量fetch + merge')
+    p_sync = subparsers.add_parser('sync', help='完整同步：市场元数据 + 链上数据 + process + clean')
     p_sync.add_argument('-a', '--alchemy', action='store_true', help='使用 Alchemy RPC')
+    p_sync.add_argument('--no-process', action='store_true', help='只同步链上数据，跳过 process/clean')
 
     # fetch-markets
     p2 = subparsers.add_parser('fetch-markets', help='增量获取新市场')
