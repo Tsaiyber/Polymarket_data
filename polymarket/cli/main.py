@@ -1243,8 +1243,9 @@ def cmd_update(args):
 
 def cmd_build_crypto_filter(args):
     """
-    从 markets.parquet 生成加密市场 ID 列表，保存到 data/crypto_market_ids.txt。
-    文件存在后，所有命令（sync/fetch-onchain/process）自动只处理加密市场。
+    从 markets.parquet 生成加密 Up/Down 市场 ID 列表，保存到 data/crypto_market_ids.txt。
+    只保留 BTC/ETH/SOL/XRP/BNB/DOGE 的涨跌预测市场（5min/15min/hourly/4hr/daily）。
+    文件存在后，所有命令（sync/process）自动只处理这些市场。
     """
     import re
 
@@ -1252,48 +1253,44 @@ def cmd_build_crypto_filter(args):
         logger.error(f"markets.parquet 不存在: {MARKETS_FILE}，请先运行 fetch-markets")
         return
 
-    logger.info("=== 生成加密市场过滤列表 ===")
-
-    # 构建关键词正则（匹配 event_slug / event_title 中的词）
-    pattern = re.compile(
-        r'\b(?:' + '|'.join(re.escape(k) for k in CRYPTO_KEYWORDS) + r')\b',
-        re.IGNORECASE
-    )
-
-    logger.info(f"关键词数量: {len(CRYPTO_KEYWORDS)}")
-    logger.info("读取 markets.parquet...")
+    logger.info("=== 生成加密 Up/Down 市场过滤列表 ===")
 
     df = pq.read_table(
         MARKETS_FILE,
-        columns=['id', 'event_slug', 'event_title', 'question']
+        columns=['id', 'event_slug', 'event_title']
     ).to_pandas()
-
     logger.info(f"总市场数: {len(df):,}")
 
-    # 匹配：event_slug 或 event_title 含加密关键词
-    slug_match = df['event_slug'].fillna('').str.lower().str.contains(pattern, regex=True)
-    title_match = df['event_title'].fillna('').str.lower().str.contains(pattern, regex=True)
-    crypto_df = df[slug_match | title_match]
+    # 匹配条件 1：含 "up or down"（涨跌预测）
+    pat_updown = re.compile(r'\bup.or.down\b', re.IGNORECASE)
+    # 匹配条件 2：含目标加密资产名
+    pat_crypto = re.compile(
+        r'\b(?:bitcoin|btc|ethereum|eth|solana|sol|xrp|ripple|bnb|doge|dogecoin)\b',
+        re.IGNORECASE
+    )
 
-    # 如果指定了 --preview，只显示不写入
+    slug = df['event_slug'].fillna('')
+    title = df['event_title'].fillna('')
+
+    updown_mask = slug.str.contains(pat_updown, regex=True) | title.str.contains(pat_updown, regex=True)
+    crypto_mask = slug.str.contains(pat_crypto, regex=True) | title.str.contains(pat_crypto, regex=True)
+    filtered_df = df[updown_mask & crypto_mask]
+
     if getattr(args, 'preview', False):
-        logger.info(f"\n匹配到 {len(crypto_df):,} 个加密市场（预览模式，不写入文件）")
-        logger.info("样例 event_slug:")
-        for slug in crypto_df['event_slug'].value_counts().head(20).index:
-            logger.info(f"  {slug}")
+        logger.info(f"\n匹配到 {len(filtered_df):,} 个市场（预览模式，不写入文件）")
+        for t in filtered_df['event_title'].dropna().drop_duplicates().head(20):
+            logger.info(f"  {t}")
         return
 
-    # 写入文件
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     with open(CRYPTO_MARKET_IDS_FILE, 'w') as f:
-        for market_id in crypto_df['id']:
+        for market_id in filtered_df['id']:
             f.write(str(market_id) + '\n')
 
-    logger.info(f"✓ 写入 {len(crypto_df):,} 个加密市场 ID → {CRYPTO_MARKET_IDS_FILE}")
-    logger.info(f"  占全部市场的 {len(crypto_df)/len(df)*100:.1f}%")
-    logger.info("加密市场过滤已启用，下次 sync/fetch-onchain/process 将自动生效")
+    logger.info(f"✓ 写入 {len(filtered_df):,} 个市场 ID → {CRYPTO_MARKET_IDS_FILE}")
+    logger.info(f"  占全部市场的 {len(filtered_df)/len(df)*100:.1f}%")
+    logger.info("过滤已启用，下次 sync/process 将自动只处理这些市场")
 
-    # 清空缓存，让下次调用重新加载
     global _crypto_ids_cache
     _crypto_ids_cache = None
 
