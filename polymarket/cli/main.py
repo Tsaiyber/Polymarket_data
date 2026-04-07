@@ -1382,26 +1382,44 @@ def cmd_merge_sessions(args):
 def cmd_sync(args):
     """
     一条命令完成完整同步：
-      1. 重试 state.json 中的 pending_blocks（自适应批次）
-      2. 增量 fetch 新区块（chain head - last_block）
-      3. merge session 文件到主文件（带去重）
+      1. 更新市场元数据 + 重建 updown_markets.parquet（确保过滤最新）
+      2. 重试 state.json 中的 pending_blocks（自适应批次）
+      3. 增量 fetch 新区块（chain head - last_block）
+      4. merge orderfilled session 文件到主文件（带去重）
+      5. process-historical（orderfilled → trades）
+      6. clean（trades → quant + users）
     """
     from ..tools.merge_parquet import merge_parquet_files
 
     use_alchemy = args.alchemy
-    fetcher = LogFetcher(use_alchemy=use_alchemy)
-    decoder = EventDecoder()
+
+    # ── Step 1: 更新市场元数据 + 重建过滤列表 ──────────────────────────────
+    # 必须最先执行，确保后续链上数据拉取使用最新的市场过滤
+    logger.info("=== Step 1: 更新市场元数据 ===")
+    args.continue_from = True
+    cmd_fetch_markets(args)
+    cmd_update_markets(args)
+    logger.info("=== Step 1b: 重建 updown_markets.parquet ===")
+    args.preview = False
+    cmd_build_crypto_filter(args)
+
+    # 重新加载过滤（已更新）
+    global _crypto_ids_cache
+    _crypto_ids_cache = None
     crypto_ids = get_crypto_ids()
-    token_mapping = load_token_mapping(MARKETS_FILE, crypto_ids=crypto_ids)
-    if MISSING_MARKETS_FILE.exists():
-        token_mapping.update(load_token_mapping(MISSING_MARKETS_FILE, crypto_ids=crypto_ids))
     if crypto_ids:
         logger.info(f"加密市场过滤已启用（{len(crypto_ids):,} 个市场）")
 
-    # ── Step 1: 重试 pending_blocks ──────────────────────────────────────
+    fetcher = LogFetcher(use_alchemy=use_alchemy)
+    decoder = EventDecoder()
+    token_mapping = load_token_mapping(MARKETS_FILE, crypto_ids=crypto_ids)
+    if MISSING_MARKETS_FILE.exists():
+        token_mapping.update(load_token_mapping(MISSING_MARKETS_FILE, crypto_ids=crypto_ids))
+
+    # ── Step 2: 重试 pending_blocks ──────────────────────────────────────
     pending = load_pending_blocks()
     if pending:
-        logger.info(f"=== Step 1: 重试 {len(pending)} 个 pending 区块 ===")
+        logger.info(f"=== Step 2: 重试 {len(pending)} 个 pending 区块 ===")
         chronic = [p for p in pending if p['attempts'] > 1]
         if chronic:
             logger.warning(f"  其中 {len(chronic)} 个为历史遗留（attempts > 1）")
@@ -1422,7 +1440,6 @@ def cmd_sync(args):
                     if formatted:
                         all_pending_formatted.extend(formatted)
 
-        # 所有 pending 数据写入单个文件（避免同秒多文件冲突）
         if all_pending_formatted:
             session_ts = datetime.now().strftime('%Y%m%d_%H%M%S')
             out = DATASET_DIR / f'orderfilled_pending_{session_ts}.parquet'
@@ -1430,48 +1447,46 @@ def cmd_sync(args):
             logger.info(f"  pending 数据已保存: {out.name} ({len(all_pending_formatted)} 行)")
 
         update_pending_blocks(newly_failed=still_failing, newly_succeeded=succeeded)
-        logger.info(f"  Step 1 完成: {len(succeeded)} 个成功，{len(still_failing)} 个仍失败")
+        logger.info(f"  Step 2 完成: {len(succeeded)} 个成功，{len(still_failing)} 个仍失败")
     else:
-        logger.info("=== Step 1: 无 pending 区块，跳过 ===")
+        logger.info("=== Step 2: 无 pending 区块，跳过 ===")
 
-    # ── Step 2: 增量 fetch 新区块 ────────────────────────────────────────
-    logger.info("=== Step 2: 增量 fetch 新区块 ===")
+    # ── Step 3: 增量 fetch 新区块 ────────────────────────────────────────
+    logger.info("=== Step 3: 增量 fetch 新区块 ===")
     args.continue_from = True
     args.blocks = None
     args.range = None
-    args.merge = False  # merge 在 Step 3 单独做
+    args.merge = False
     cmd_fetch_onchain(args)
 
-    # ── Step 3: merge session 文件 ───────────────────────────────────────
-    logger.info("=== Step 3: merge session 文件 ===")
-    main_file = DECODED_EVENTS_FILE  # orderfilled.parquet
+    # ── Step 4: merge orderfilled session 文件 ───────────────────────────
+    logger.info("=== Step 4: merge session 文件 ===")
+    main_file = DECODED_EVENTS_FILE
 
     session_files = sorted(glob.glob(str(DATASET_DIR / 'orderfilled_session_*.parquet')))
     pending_files = sorted(glob.glob(str(DATASET_DIR / 'orderfilled_pending_*.parquet')))
     refetch_files = sorted(glob.glob(str(DATASET_DIR / 'orderfilled_refetched_*.parquet')))
-
     new_files = session_files + pending_files + refetch_files
-    if not new_files:
-        logger.info("  没有新的 session 文件，跳过 merge")
-        return
 
-    logger.info(f"  待合并文件: {len(new_files)} 个")
-    out_file = str(main_file).replace('.parquet', '_synced.parquet')
-    success = merge_parquet_files(
-        [str(main_file)] + new_files,
-        out_file,
-        auto_yes=True,
-        dedup=True,
-    )
-    if success:
-        shutil.move(out_file, str(main_file))
-        logger.info(f"  ✓ merge 完成，主文件已更新: {main_file.name}")
-        # 删除已合并的 session 文件
-        for f in new_files:
-            Path(f).unlink(missing_ok=True)
-        logger.info(f"  ✓ 已清理 {len(new_files)} 个 session 文件")
+    if new_files:
+        logger.info(f"  待合并文件: {len(new_files)} 个")
+        out_file = str(main_file).replace('.parquet', '_synced.parquet')
+        success = merge_parquet_files(
+            [str(main_file)] + new_files,
+            out_file,
+            auto_yes=True,
+            dedup=True,
+        )
+        if success:
+            shutil.move(out_file, str(main_file))
+            logger.info(f"  ✓ merge 完成，主文件已更新: {main_file.name}")
+            for f in new_files:
+                Path(f).unlink(missing_ok=True)
+            logger.info(f"  ✓ 已清理 {len(new_files)} 个 session 文件")
+        else:
+            logger.error("  merge 失败，session 文件保留")
     else:
-        logger.error("  merge 失败，session 文件保留")
+        logger.info("  没有新的 session 文件，跳过 merge")
 
     # 打印 pending 概况
     remaining = load_pending_blocks()
@@ -1483,15 +1498,6 @@ def cmd_sync(args):
     if getattr(args, 'no_process', False):
         logger.info("=== sync 完成（跳过 process/clean）===")
         return
-
-    # ── Step 4: 更新市场元数据 + 重建过滤列表 ──────────────────────────────
-    logger.info("=== Step 4: 更新市场元数据 ===")
-    args.continue_from = True
-    cmd_fetch_markets(args)
-    cmd_update_markets(args)
-    logger.info("=== Step 4b: 重建 updown_market_ids.txt ===")
-    args.preview = False
-    cmd_build_crypto_filter(args)
 
     # ── Step 5: process orderfilled → trades ────────────────────────────
     logger.info("=== Step 5: process-historical（orderfilled → trades）===")
