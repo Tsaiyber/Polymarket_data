@@ -51,7 +51,7 @@ TEMP_DIR = DATA_DIR / 'temp'
 # Up/Down 市场过滤：此文件存在时，自动只处理加密 Up/Down 市场
 # 通过 `uv run polymarket build-crypto-filter` 生成
 # 包含 BTC/ETH/SOL/XRP/BNB/DOGE 的 5min/15min/hourly/4hr/daily 涨跌预测市场
-CRYPTO_MARKET_IDS_FILE = DATA_DIR / 'updown_market_ids.txt'
+CRYPTO_MARKET_IDS_FILE = DATA_DIR / 'updown_markets.parquet'
 
 
 # ============== 区块链 ==============

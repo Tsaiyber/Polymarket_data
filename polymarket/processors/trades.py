@@ -177,14 +177,15 @@ def _parse_order_filled(event: Dict, token_mapping: Optional[Dict[str, Dict]] = 
 
 def load_crypto_market_ids(crypto_ids_file=None) -> Optional[Set[str]]:
     """
-    读取加密市场 ID 集合。文件不存在时返回 None（不过滤）。
+    读取 updown_markets.parquet，返回市场 ID 集合。文件不存在时返回 None（不过滤）。
     """
+    import pandas as pd
     if crypto_ids_file is None:
         crypto_ids_file = CRYPTO_MARKET_IDS_FILE
     if not Path(crypto_ids_file).exists():
         return None
-    with open(crypto_ids_file) as f:
-        ids = {line.strip() for line in f if line.strip()}
+    df = pd.read_parquet(crypto_ids_file, columns=['id'])
+    ids = set(df['id'].tolist())
     logger.info(f"加密市场过滤已启用：{len(ids):,} 个市场")
     return ids
 

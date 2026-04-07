@@ -1243,7 +1243,7 @@ def cmd_update(args):
 
 def cmd_build_crypto_filter(args):
     """
-    从 markets.parquet 生成加密 Up/Down 市场 ID 列表，保存到 data/crypto_market_ids.txt。
+    从 markets.parquet 生成加密 Up/Down 市场列表，保存到 data/updown_markets.parquet。
     只保留 BTC/ETH/SOL/XRP/BNB/DOGE 的涨跌预测市场（5min/15min/hourly/4hr/daily）。
     文件存在后，所有命令（sync/process）自动只处理这些市场。
     """
@@ -1257,13 +1257,11 @@ def cmd_build_crypto_filter(args):
 
     df = pq.read_table(
         MARKETS_FILE,
-        columns=['id', 'event_slug', 'event_title']
+        columns=['id', 'event_slug', 'event_title', 'token1', 'token2', 'end_date', 'created_at']
     ).to_pandas()
     logger.info(f"总市场数: {len(df):,}")
 
-    # 匹配条件 1：含 "up or down"（涨跌预测）
     pat_updown = re.compile(r'\bup.or.down\b', re.IGNORECASE)
-    # 匹配条件 2：含目标加密资产名
     pat_crypto = re.compile(
         r'\b(?:bitcoin|btc|ethereum|eth|solana|sol|xrp|ripple|bnb|doge|dogecoin)\b',
         re.IGNORECASE
@@ -1271,23 +1269,46 @@ def cmd_build_crypto_filter(args):
 
     slug = df['event_slug'].fillna('')
     title = df['event_title'].fillna('')
-
     updown_mask = slug.str.contains(pat_updown, regex=True) | title.str.contains(pat_updown, regex=True)
     crypto_mask = slug.str.contains(pat_crypto, regex=True) | title.str.contains(pat_crypto, regex=True)
-    filtered_df = df[updown_mask & crypto_mask]
+    filtered_df = df[updown_mask & crypto_mask].copy()
+
+    # 标注 asset
+    def get_asset(t):
+        t = t.lower()
+        for asset, kws in [('BTC', ['bitcoin', 'btc']), ('ETH', ['ethereum', 'eth']),
+                           ('SOL', ['solana', 'sol']), ('XRP', ['xrp', 'ripple']),
+                           ('BNB', ['bnb']), ('DOGE', ['doge', 'dogecoin'])]:
+            if any(k in t for k in kws):
+                return asset
+        return 'OTHER'
+
+    # 标注 period
+    def get_period(t):
+        m = re.search(r'(\d+):(\d+)[AP]M-(\d+):(\d+)[AP]M', t, re.IGNORECASE)
+        if m:
+            diff = (int(m.group(3)) * 60 + int(m.group(4)) - int(m.group(1)) * 60 - int(m.group(2))) % (12 * 60)
+            return f'{diff}min'
+        if re.search(r'\d+[AP]M ET', t, re.IGNORECASE):
+            return 'hourly'
+        if re.search(r'on \w+ \d+', t, re.IGNORECASE):
+            return 'daily'
+        return 'other'
+
+    filtered_df['asset'] = filtered_df['event_title'].apply(get_asset)
+    filtered_df['period'] = filtered_df['event_title'].apply(get_period)
 
     if getattr(args, 'preview', False):
         logger.info(f"\n匹配到 {len(filtered_df):,} 个市场（预览模式，不写入文件）")
-        for t in filtered_df['event_title'].dropna().drop_duplicates().head(20):
-            logger.info(f"  {t}")
+        from collections import Counter
+        for (a, p), cnt in sorted(Counter(zip(filtered_df['asset'], filtered_df['period'])).items()):
+            logger.info(f"  {a:5s} {p:8s}: {cnt:,}")
         return
 
     DATA_DIR.mkdir(parents=True, exist_ok=True)
-    with open(CRYPTO_MARKET_IDS_FILE, 'w') as f:
-        for market_id in filtered_df['id']:
-            f.write(str(market_id) + '\n')
+    filtered_df.to_parquet(CRYPTO_MARKET_IDS_FILE, index=False)
 
-    logger.info(f"✓ 写入 {len(filtered_df):,} 个市场 ID → {CRYPTO_MARKET_IDS_FILE}")
+    logger.info(f"✓ 写入 {len(filtered_df):,} 个市场 → {CRYPTO_MARKET_IDS_FILE}")
     logger.info(f"  占全部市场的 {len(filtered_df)/len(df)*100:.1f}%")
     logger.info("过滤已启用，下次 sync/process 将自动只处理这些市场")
 
