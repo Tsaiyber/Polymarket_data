@@ -17,7 +17,7 @@ from typing import Dict, List, Any, Optional, Set
 
 import pandas as pd
 
-from ..config import MARKETS_FILE, CRYPTO_MARKET_IDS_FILE, CRYPTO_KEYWORDS
+from ..config import MARKETS_FILE, CRYPTO_MARKET_IDS_FILE
 
 logger = logging.getLogger(__name__)
 

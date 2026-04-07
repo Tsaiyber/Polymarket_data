@@ -31,7 +31,7 @@ from ..config import (
     MARKETS_PREVIEW_FILE, ORDERFILLED_PREVIEW_FILE,
     USERS_CLEAN_FILE, QUANT_CLEAN_FILE,
     USERS_PREVIEW_FILE, QUANT_PREVIEW_FILE,
-    CRYPTO_MARKET_IDS_FILE, CRYPTO_KEYWORDS,
+    CRYPTO_MARKET_IDS_FILE,
 )
 from ..fetchers import LogFetcher, GammaApiClient
 from ..processors import (

@@ -48,23 +48,10 @@ QUANT_PREVIEW_FILE = LATEST_RESULT_DIR / 'quant.csv'
 STATE_FILE = DATA_DIR / 'state.json'
 TEMP_DIR = DATA_DIR / 'temp'
 
-# 加密货币过滤：此文件存在时，自动只处理加密货币市场
+# Up/Down 市场过滤：此文件存在时，自动只处理加密 Up/Down 市场
 # 通过 `uv run polymarket build-crypto-filter` 生成
-CRYPTO_MARKET_IDS_FILE = DATA_DIR / 'crypto_market_ids.txt'
-
-# 加密货币市场关键词（匹配 event_slug 或 event_title）
-CRYPTO_KEYWORDS = [
-    'bitcoin', 'btc', 'ethereum', 'eth', 'crypto', 'defi',
-    'solana', 'xrp', 'ripple', 'bnb', 'binance', 'doge', 'dogecoin',
-    'chainlink', 'avalanche', 'avax', 'cardano', 'uniswap', 'aave',
-    'polygon', 'matic', 'altcoin', 'nft', 'stablecoin', 'web3',
-    'blockchain', 'dai', 'usdt', 'litecoin', 'ltc', 'tron', 'trx',
-    'shiba', 'pepe', 'memecoin', 'arbitrum', 'optimism', 'layer2',
-    'sui', 'aptos', 'near', 'cosmos', 'atom', 'polkadot', 'dot',
-    'stellar', 'xlm', 'monero', 'xmr', 'maker', 'compound',
-    'token', 'coin', 'exchange', 'wallet', 'mining', 'halving',
-    'spot-etf', 'crypto-etf', 'coinbase', 'kraken', 'bybit',
-]
+# 包含 BTC/ETH/SOL/XRP/BNB/DOGE 的 5min/15min/hourly/4hr/daily 涨跌预测市场
+CRYPTO_MARKET_IDS_FILE = DATA_DIR / 'updown_market_ids.txt'
 
 
 # ============== 区块链 ==============
