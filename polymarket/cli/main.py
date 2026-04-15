@@ -778,17 +778,21 @@ def cmd_process_historical(args):
     """分批处理历史数据（用于大文件，避免内存溢出）
 
     使用方式：
-        python3 run.py process-historical --batch-size 1000000
-        python3 run.py process-historical --continue  # 从断点继续
+        uv run polymarket process-historical               # 全量（从头覆盖）
+        uv run polymarket process-historical --continue   # 断点续传（恢复中断的全量处理）
+        # sync 内部调用时：continue_from=True → 增量模式（只处理 orderfilled 新增部分）
 
     说明：
-        - 分批读取 orderfilled.parquet
-        - 使用 PyArrow 流式写入（不读取已有数据）
-        - 支持断点续传，中断后可继续
-        - 安全退出：Ctrl+C 完成当前批次后关闭writer保存
+        - 全量模式（continue_from=False）：删除旧 trades/quant/users，从头写入主文件
+        - 增量模式（continue_from=True，state 中有 last_total_rows）：
+            只处理上次成功后新增的行，写 session 文件，完成后流式合并到主文件
+        - 断点续传模式（continue_from=True，state 中有 resume_batch）：
+            恢复上次中断的批次，继续写入同一 session 文件，完成后流式合并
+        - 安全退出：Ctrl+C 完成当前批次后保存进度，下次 --continue 可续传
     """
     import signal
     import gc
+    from ..tools.merge_parquet import merge_parquet_files
 
     if not DECODED_EVENTS_FILE.exists():
         logger.error(f"事件文件不存在: {DECODED_EVENTS_FILE}")
@@ -796,40 +800,61 @@ def cmd_process_historical(args):
 
     batch_size = getattr(args, 'batch_size', 1000000)  # 默认每批100万条
     test_batches = getattr(args, 'test_batches', None)  # 测试模式
-    continue_from = getattr(args, 'continue_from', False)  # 断点续传
+    continue_from = getattr(args, 'continue_from', False)  # 增量/续传模式
     checkpoint_interval = 10  # 每10批保存进度
 
-    # 读取上次进度（从state.json）
+    # ── 读取 state，确定起始批次和模式 ─────────────────────────────────────
     start_batch = 0
     total_trades = 0
     total_quant = 0
     total_users = 0
-    session_id = 0  # 用于区分不同运行session的文件
+    session_ts = datetime.now().strftime('%Y%m%d_%H%M%S')  # session 文件时间戳
+    incremental_mode = False   # True = 增量（只处理新增行）
+    resume_mode = False        # True = 恢复中断的批次处理
+    prev_last_total_rows = 0   # 增量模式：上次成功处理的总行数
 
     if continue_from and STATE_FILE.exists():
         try:
             with open(STATE_FILE) as f:
-                state = json.load(f)
-                process_state = state.get('process_historical', {})
-                start_batch = process_state.get('last_batch', -1) + 1
+                state_data = json.load(f)
+                process_state = state_data.get('process_historical', {})
+
+            resume_batch = process_state.get('resume_batch')
+            resume_session_ts = process_state.get('resume_session_ts')
+
+            if resume_batch is not None:
+                # 模式1：断点续传（上次中断了全量或增量处理）
+                start_batch = resume_batch + 1
+                session_ts = resume_session_ts or session_ts
                 total_trades = process_state.get('total_trades', 0)
                 total_quant = process_state.get('total_quant', 0)
                 total_users = process_state.get('total_users', 0)
-                session_id = process_state.get('session_id', 0) + 1
-                if start_batch > 0:
-                    logger.info(f"从批次 {start_batch + 1} 继续处理 (session {session_id})")
-                    logger.info(f"  已有数据: trades={total_trades:,}, quant={total_quant:,}, users={total_users:,}")
+                prev_last_total_rows = process_state.get('last_total_rows', 0)
+                resume_mode = True
+                incremental_mode = process_state.get('incremental_mode', False)
+                logger.info(f"断点续传：从批次 {start_batch + 1} 继续 (session={session_ts})")
+                logger.info(f"  已有: trades={total_trades:,}, quant={total_quant:,}, users={total_users:,}")
+            else:
+                # 模式2：增量同步（只处理新增行）
+                last_total_rows = process_state.get('last_total_rows', 0)
+                prev_last_total_rows = last_total_rows
+                if last_total_rows > 0:
+                    start_batch = last_total_rows // batch_size
+                    incremental_mode = True
+                    logger.info(f"增量模式：上次处理 {last_total_rows:,} 行，从批次 {start_batch + 1} 开始")
+                else:
+                    logger.info("首次运行（无历史记录），增量模式退化为全量")
         except Exception as e:
             logger.warning(f"读取进度失败: {e}，从头开始")
             start_batch = 0
 
     if test_batches:
         logger.info(f"测试模式：处理批次 {start_batch + 1} 到 {start_batch + test_batches}，每批 {batch_size:,} 条")
+    elif start_batch > 0:
+        mode_label = '增量' if incremental_mode else '续传'
+        logger.info(f"{mode_label}处理历史数据，从批次 {start_batch + 1} 开始，每批 {batch_size:,} 条")
     else:
-        if start_batch > 0:
-            logger.info(f"继续分批处理历史数据，从批次 {start_batch + 1} 开始，每批 {batch_size:,} 条")
-        else:
-            logger.info(f"开始分批处理历史数据，每批 {batch_size:,} 条")
+        logger.info(f"全量处理历史数据，每批 {batch_size:,} 条")
 
     # 1. 加载 token 映射
     logger.info("加载 token 映射...")
@@ -870,19 +895,23 @@ def cmd_process_historical(args):
     original_sigterm = signal.signal(signal.SIGTERM, signal_handler)
 
     # 确定输出文件路径
-    # 如果是续传，写入新的session文件；否则直接写主文件
-    if start_batch > 0:
-        trades_output = DATASET_DIR / f'trades_session_{session_id}.parquet'
-        quant_output = DATA_CLEAN_DIR / f'quant_session_{session_id}.parquet'
-        users_output = DATA_CLEAN_DIR / f'users_session_{session_id}.parquet'
+    # 增量/续传模式 → 写 session 文件，成功后流式合并到主文件
+    # 全量模式      → 直接写主文件（先删除旧文件）
+    use_session_files = continue_from  # 增量或续传都用 session 文件
+    if use_session_files:
+        trades_output = DATASET_DIR / f'trades_session_{session_ts}.parquet'
+        quant_output = DATA_CLEAN_DIR / f'quant_session_{session_ts}.parquet'
+        users_output = DATA_CLEAN_DIR / f'users_session_{session_ts}.parquet'
+        logger.info(f"输出到 session 文件 ({session_ts})")
     else:
-        # 从头开始，删除旧文件
+        # 全量模式：删除旧主文件，直接写入
         trades_output = TRADES_OUTPUT_FILE
         quant_output = QUANT_CLEAN_FILE
         users_output = USERS_CLEAN_FILE
         for f in [trades_output, quant_output, users_output]:
             if f.exists():
                 f.unlink()
+        logger.info("全量模式：已清除旧文件")
 
     # PyArrow 流式 writers
     trades_writer = None
@@ -890,7 +919,10 @@ def cmd_process_historical(args):
     users_writer = None
 
     def save_progress(batch_idx, final=False):
-        """保存进度到 state.json"""
+        """保存进度到 state.json。
+        final=True  → 成功完成，清除 resume_batch，更新 last_total_rows
+        final=False → 中途保存，记录 resume_batch 以便下次续传
+        """
         state = {}
         if STATE_FILE.exists():
             try:
@@ -899,15 +931,32 @@ def cmd_process_historical(args):
             except:
                 pass
 
-        state['process_historical'] = {
-            'last_batch': batch_idx,
-            'total_batches': total_batches,
-            'total_trades': total_trades,
-            'total_quant': total_quant,
-            'total_users': total_users,
-            'session_id': session_id,
-            'updated_at': datetime.now().isoformat()
-        }
+        if final:
+            # 成功完成：清除续传标记，更新 last_total_rows
+            state['process_historical'] = {
+                'last_total_rows': total_rows,   # 下次增量从这里开始
+                'resume_batch': None,
+                'resume_session_ts': None,
+                'incremental_mode': False,
+                'total_batches': total_batches,
+                'total_trades': total_trades,
+                'total_quant': total_quant,
+                'total_users': total_users,
+                'updated_at': datetime.now().isoformat()
+            }
+        else:
+            # 中途保存：记录续传信息，保持 last_total_rows 不变（未完成不更新）
+            state['process_historical'] = {
+                'last_total_rows': prev_last_total_rows,  # 保持上次成功的值
+                'resume_batch': batch_idx,
+                'resume_session_ts': session_ts,
+                'incremental_mode': incremental_mode,
+                'total_batches': total_batches,
+                'total_trades': total_trades,
+                'total_quant': total_quant,
+                'total_users': total_users,
+                'updated_at': datetime.now().isoformat()
+            }
 
         with open(STATE_FILE, 'w') as f:
             json.dump(state, f, indent=2)
@@ -926,40 +975,36 @@ def cmd_process_historical(args):
             users_writer = None
 
     def merge_session_files():
-        """合并所有session文件到主文件"""
-        for main_file, pattern, output_dir in [
-            (TRADES_OUTPUT_FILE, 'trades_session_*.parquet', DATASET_DIR),
-            (QUANT_CLEAN_FILE, 'quant_session_*.parquet', DATA_CLEAN_DIR),
-            (USERS_CLEAN_FILE, 'users_session_*.parquet', DATA_CLEAN_DIR)
+        """流式合并 session 文件到主文件（避免整体读入 OOM）"""
+        for session_file, main_file in [
+            (trades_output, TRADES_OUTPUT_FILE),
+            (quant_output, QUANT_CLEAN_FILE),
+            (users_output, USERS_CLEAN_FILE),
         ]:
-            session_files = sorted(glob.glob(str(output_dir / pattern)))
-            if not session_files:
+            if not session_file.exists():
                 continue
-
-            # 收集所有文件（主文件 + session文件）
-            all_files = []
-            if main_file.exists():
-                all_files.append(str(main_file))
-            all_files.extend(session_files)
-
-            if len(all_files) <= 1:
-                # 只有一个文件，如果是session文件就重命名为主文件
-                if session_files and not main_file.exists():
-                    shutil.move(session_files[0], str(main_file))
+            if not main_file.exists():
+                # 主文件不存在，直接重命名 session 文件
+                shutil.move(str(session_file), str(main_file))
+                logger.info(f"  ✓ {session_file.name} → {main_file.name}")
                 continue
-
-            # 合并所有文件
-            logger.info(f"合并 {len(all_files)} 个文件到 {main_file.name}...")
-            tables = [pq.read_table(f) for f in all_files]
-            combined = pa.concat_tables(tables)
-            pq.write_table(combined, main_file, compression='snappy')
-
-            # 删除session文件
-            for sf in session_files:
-                Path(sf).unlink()
-
-            del tables, combined
-            gc.collect()
+            # 主文件存在：流式合并（写临时文件再替换）
+            tmp_file = str(main_file).replace('.parquet', '_merge_tmp.parquet')
+            logger.info(f"  流式合并 {session_file.name} → {main_file.name}...")
+            success = merge_parquet_files(
+                [str(main_file), str(session_file)],
+                tmp_file,
+                auto_yes=True,
+                dedup=False,  # trades/quant/users 无需去重（orderfilled 已去重）
+            )
+            if success:
+                shutil.move(tmp_file, str(main_file))
+                session_file.unlink()
+                logger.info(f"  ✓ 合并完成：{main_file.name}")
+            else:
+                logger.error(f"  合并失败，session 文件保留: {session_file.name}")
+                if Path(tmp_file).exists():
+                    Path(tmp_file).unlink()
 
     try:
         last_completed_batch = start_batch - 1
@@ -969,7 +1014,7 @@ def cmd_process_historical(args):
             if stop_requested:
                 logger.info("收到退出信号，关闭writers并保存进度...")
                 close_writers()
-                save_progress(last_completed_batch)
+                save_progress(last_completed_batch, final=False)
                 break
 
             # 跳过已处理的批次
@@ -1040,7 +1085,7 @@ def cmd_process_historical(args):
             # 每 N 批保存进度（只保存state，不关闭writer）
             batches_processed = batch_idx - start_batch + 1
             if batches_processed > 0 and batches_processed % checkpoint_interval == 0:
-                save_progress(batch_idx)
+                save_progress(batch_idx, final=False)
                 logger.info(f"  ✓ 进度已保存 (批次 {batch_idx + 1})")
 
             # 显式释放内存
@@ -1054,22 +1099,27 @@ def cmd_process_historical(args):
         # 正常完成
         if not stop_requested:
             close_writers()
-            save_progress(last_completed_batch)
+            save_progress(last_completed_batch, final=True)
 
-            # 合并所有session文件
-            if session_id > 0:
-                logger.info("合并所有session文件...")
+            # 增量/续传模式：流式合并 session 文件到主文件
+            if use_session_files:
+                logger.info("合并 session 文件到主文件（流式）...")
                 merge_session_files()
 
-            logger.info(f"历史数据处理完成!")
+            logger.info(f"历史数据处理完成！")
             logger.info(f"  总计: 交易 {total_trades:,}, quant {total_quant:,}, users {total_users:,}")
+        else:
+            # 收到退出信号：保存续传进度
+            close_writers()
+            save_progress(last_completed_batch, final=False)
+            logger.info(f"已保存进度（批次 {last_completed_batch + 1}），下次运行 --continue 可续传")
 
     except Exception as e:
         logger.error(f"处理出错: {e}")
         close_writers()
         if last_completed_batch >= start_batch:
-            save_progress(last_completed_batch)
-            logger.info(f"已保存进度到批次 {last_completed_batch + 1}")
+            save_progress(last_completed_batch, final=False)
+            logger.info(f"已保存进度到批次 {last_completed_batch + 1}，下次运行 --continue 可续传")
         raise
 
     finally:
@@ -1496,20 +1546,17 @@ def cmd_sync(args):
             logger.warning(f"  {p['start']}-{p['end']}  attempts={p['attempts']}  last_tried={p['last_tried']}")
 
     if getattr(args, 'no_process', False):
-        logger.info("=== sync 完成（跳过 process/clean）===")
+        logger.info("=== sync 完成（跳过 process）===")
         return
 
-    # ── Step 5: process orderfilled → trades ────────────────────────────
-    logger.info("=== Step 5: process-historical（orderfilled → trades）===")
+    # ── Step 5: 增量 process（只处理 orderfilled 新增部分）─────────────
+    # continue_from=True → 增量模式：读取 state.last_total_rows，跳过已处理行
+    # 新增的 trades/quant/users 写入 session 文件，完成后流式合并到主文件
+    logger.info("=== Step 5: 增量 process-historical（orderfilled → trades/quant/users）===")
     args.batch_size = getattr(args, 'batch_size', 1_000_000)
     args.test_batches = None
-    args.continue_from = False
+    args.continue_from = True   # 增量模式（非全量覆盖）
     cmd_process_historical(args)
-
-    # ── Step 6: clean trades → quant + users ────────────────────────────
-    logger.info("=== Step 6: clean（trades → quant + users）===")
-    args.test = None
-    cmd_clean(args)
 
     logger.info("=== sync 全流程完成 ===")
 
